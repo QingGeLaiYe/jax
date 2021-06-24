@@ -3211,6 +3211,19 @@ class RematTest(jtu.JaxTestCase):
     with self.assertRaisesRegex(core.UnexpectedTracerError, "global state"):
       api.jit(f)()
 
+  def test_no_widget_on_primals(self):
+    @api.remat
+    def g(x):
+      return lax.sin(lax.sin(x)), 3.
+
+    def f(x):
+      x, _ = g(x)
+      return x
+
+    c = api.xla_computation(f)(2.)
+    self.assertNotIn('while', c.as_hlo_text())
+    self.assertNotIn('conditional', c.as_hlo_text())
+
 
 class JaxprTest(jtu.JaxTestCase):
 
