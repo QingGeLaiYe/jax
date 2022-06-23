@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# flake8: noqa: F401
 from jax._src.lax.linalg import (
   cholesky,
   cholesky_p,
@@ -31,4 +30,11 @@ from jax._src.lax.linalg import (
   triangular_solve_p,
   tridiagonal_solve,
   tridiagonal_solve_p,
+  schur,
+  schur_p
+)
+
+
+from jax._src.lax.qdwh import (
+  qdwh as qdwh
 )

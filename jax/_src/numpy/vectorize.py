@@ -18,14 +18,14 @@ from typing import Any, Callable, Dict, List, Tuple
 
 from jax._src import api
 from jax import lax
-from . import lax_numpy as jnp
+from jax._src.numpy import lax_numpy as jnp
 from jax._src.util import safe_map as map, safe_zip as zip
 
 
 # See http://docs.scipy.org/doc/numpy/reference/c-api.generalized-ufuncs.html
 _DIMENSION_NAME = r'\w+'
 _CORE_DIMENSION_LIST = '(?:{0:}(?:,{0:})*)?'.format(_DIMENSION_NAME)
-_ARGUMENT = r'\({}\)'.format(_CORE_DIMENSION_LIST)
+_ARGUMENT = fr'\({_CORE_DIMENSION_LIST}\)'
 _ARGUMENT_LIST = '{0:}(?:,{0:})*'.format(_ARGUMENT)
 _SIGNATURE = '^{0:}->{0:}$'.format(_ARGUMENT_LIST)
 
@@ -48,7 +48,7 @@ def _parse_gufunc_signature(
   """
   if not re.match(_SIGNATURE, signature):
     raise ValueError(
-        'not a valid gufunc signature: {}'.format(signature))
+        f'not a valid gufunc signature: {signature}')
   args, retvals = ([tuple(re.findall(_DIMENSION_NAME, arg))
                    for arg in re.findall(_ARGUMENT, arg_list)]
                    for arg_list in signature.split('->'))
@@ -121,7 +121,8 @@ def _parse_input_dimensions(
     ndim = arg.ndim - len(core_dims)
     shapes.append(arg.shape[:ndim])
   broadcast_shape = lax.broadcast_shapes(*shapes)
-  return broadcast_shape, dim_sizes
+  # TODO(mattjj): this code needs updating for dynamic shapes (hence ignore)
+  return broadcast_shape, dim_sizes  # type: ignore
 
 
 def _check_output_dims(
@@ -208,8 +209,8 @@ def vectorize(pyfunc, *, excluded=frozenset(), signature=None):
   Returns:
     Vectorized version of the given function.
 
-  Here a few examples of how one could write vectorized linear algebra routines
-  using :func:`vectorize`:
+  Here are a few examples of how one could write vectorized linear algebra
+  routines using :func:`vectorize`:
 
   >>> from functools import partial
 
@@ -255,7 +256,7 @@ def vectorize(pyfunc, *, excluded=frozenset(), signature=None):
     raise TypeError("jax.numpy.vectorize can only exclude integer arguments, "
                     "but excluded={!r}".format(excluded))
   if excluded and min(excluded) < 0:
-    raise ValueError("excluded={!r} contains negative numbers".format(excluded))
+    raise ValueError(f"excluded={excluded!r} contains negative numbers")
 
   @functools.wraps(pyfunc)
   def wrapped(*args):

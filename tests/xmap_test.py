@@ -12,18 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# flake8: noqa
-
-from contextlib import contextmanager
 import functools
 import itertools as it
 import os
 import re
-import unittest
 from itertools import product, permutations
-from typing import (Tuple, List, NamedTuple, Dict, Generator, Sequence, Set,
-                    Any, Hashable, Iterable, Iterator, Union)
-from unittest import SkipTest, skip, skipIf
+from typing import (Tuple, List, Dict, Generator, Iterator, Union, Optional)
+from unittest import SkipTest
 
 import numpy as np
 from absl.testing import absltest
@@ -33,19 +28,25 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 import jax.scipy as jscipy
-from jax import test_util as jtu
+from jax._src import test_util as jtu
 from jax import vmap
 from jax import lax
 from jax import core
-from jax.core import NamedShape, JaxprTypeError
+from jax.core import NamedShape
 from jax.experimental import maps
-from jax.experimental.maps import Mesh, mesh, xmap, serial_loop, SerialLoop
+from jax.experimental import global_device_array
+from jax.experimental import array
+from jax.experimental.sharding import MeshPspecSharding
+from jax.experimental.pjit import pjit, with_sharding_constraint
+from jax.experimental.pjit import PartitionSpec as P
+from jax.experimental.maps import xmap, serial_loop, SerialLoop
 from jax.errors import JAXTypeError
-from jax.lib import xla_bridge
-from jax._src.util import curry, unzip2, split_list, prod
-from jax._src.lax.lax import DotDimensionNumbers
+from jax._src.lib import xla_bridge
+from jax._src.lib import xla_client
+from jax._src.util import curry, unzip2, prod, safe_zip
 from jax._src.lax.parallel import pgather
 from jax.interpreters import batching, pxla
+from jax.ad_checkpoint import checkpoint
 
 from jax.config import config
 config.parse_flags_with_absl()
@@ -72,6 +73,17 @@ def tearDownModule():
   xla_bridge.get_backend.cache_clear()
 
 
+def create_array(global_shape, global_mesh, mesh_axes, global_data=None):
+  if global_data is None:
+    global_data = np.arange(
+        prod(global_shape), dtype=np.float32).reshape(global_shape)
+
+  sharding = MeshPspecSharding(global_mesh, mesh_axes)
+
+  return array.make_array_from_callback(
+      global_shape, sharding, lambda idx: global_data[idx]), global_data
+
+
 # -------------------- Itertools helpers --------------------
 
 def partitions(s, k):
@@ -89,12 +101,12 @@ def powerset(s):
 
 ensure_bdim_p = core.Primitive('ensure_bdim')
 ensure_bdim_p.def_abstract_eval(lambda x, **kwargs: core.raise_to_shaped(x))
-def _ensure_bdim_batcher(frame, vals_in, dims_in, axis_name, bdim):
+def _ensure_bdim_batcher(axis_size, frame_name, main_type, vals_in, dims_in, axis_name, bdim):
   v, = vals_in
   d, = dims_in
   assert d is not batching.not_mapped
   return jnp.moveaxis(v, d, bdim), bdim
-batching.collective_rules[ensure_bdim_p] = _ensure_bdim_batcher
+batching.axis_primitive_batchers[ensure_bdim_p] = _ensure_bdim_batcher
 batching.primitive_batchers[ensure_bdim_p] = lambda v, d: (v[0], d[0])
 core.axis_substitution_rules[ensure_bdim_p] = partial(jax._src.lax.parallel._subst_all_names_in_param,
                                                       'axis_name')
@@ -213,16 +225,24 @@ class XMapTestCase(jtu.BufferDonationTestCase):
 # A mixin that enables SPMD lowering tests
 class SPMDTestMixin:
   def setUp(self):
-    if jtu.device_under_test() not in ['tpu', 'gpu']:
-      raise SkipTest
     super().setUp()
-    jax.experimental.maps.make_xmap_callable.cache_clear()
-    self.old_lowering_flag = jax.experimental.maps.EXPERIMENTAL_SPMD_LOWERING
-    jax.experimental.maps.EXPERIMENTAL_SPMD_LOWERING = True
+    jtu.set_spmd_lowering_flag(True)
 
   def tearDown(self):
-    jax.experimental.maps.make_xmap_callable.cache_clear()
-    jax.experimental.maps.EXPERIMENTAL_SPMD_LOWERING = self.old_lowering_flag
+    jtu.restore_spmd_lowering_flag()
+
+
+class ManualSPMDTestMixin:
+  def setUp(self):
+    if not hasattr(xla_client.OpSharding.Type, "MANUAL"):
+      raise SkipTest
+    super().setUp()
+    jtu.set_spmd_lowering_flag(True)
+    jtu.set_spmd_manual_lowering_flag(True)
+
+  def tearDown(self):
+    jtu.restore_spmd_manual_lowering_flag()
+    jtu.restore_spmd_lowering_flag()
 
 
 class XMapTest(XMapTestCase):
@@ -234,10 +254,10 @@ class XMapTest(XMapTestCase):
     def f(a, b):
       return a * 2, b * 4
     devices = np.array(local_devices[:4]).reshape((2, 2))
-    with mesh(devices, ('x', 'y')):
+    with maps.Mesh(devices, ('x', 'y')):
       fm = xmap(f,
-                in_axes=[{0: 'a', 1: 'b'}, ['c', ...]],
-                out_axes=[{0: 'a', 1: 'b'}, ['c', ...]],
+                in_axes=({0: 'a', 1: 'b'}, ['c', ...]),
+                out_axes=({0: 'a', 1: 'b'}, ['c', ...]),
                 axis_resources={'a': 'x', 'b': 'y', 'c': 'x'})
       ashape = (16, 8, 5)
       a = jnp.arange(np.prod(ashape)).reshape(ashape)
@@ -250,8 +270,8 @@ class XMapTest(XMapTestCase):
   @jtu.with_mesh([('x', 2), ('y', 2)])
   def testCollectiveReduce(self):
     fm = xmap(lambda a, b: (lax.psum(a * 2, 'a'), b * 4),
-              in_axes=[['a', 'b', ...], {0: 'c'}],
-              out_axes=[['b', ...], {0: 'c'}],
+              in_axes=(['a', 'b', ...], {0: 'c'}),
+              out_axes=(['b', ...], {0: 'c'}),
               axis_resources={'a': 'x', 'b': 'y', 'c': 'x'})
     ashape = (16, 8, 5)
     a = jnp.arange(np.prod(ashape)).reshape(ashape)
@@ -280,16 +300,16 @@ class XMapTest(XMapTestCase):
     self.assertAllClose(result, perm)
 
   def testCollectiveAllGather(self):
-    x = jnp.arange(4)
+    x = jnp.arange(4, dtype='int32')
     result = xmap(lambda x: lax.all_gather(x, 'i') + lax.axis_index('i'),
                   in_axes=['i', ...], out_axes=['i', ...])(x)
-    self.assertAllClose(result, x + x[jnp.newaxis].T)
+    self.assertAllClose(result, x[jnp.newaxis] + x[jnp.newaxis].T)
 
   @jtu.with_mesh([('x', 2), ('y', 2)])
   def testOneLogicalTwoMeshAxesBasic(self):
     def f(v):
       return lax.psum(v * 2, 'a'), v * 4
-    fm = xmap(f, in_axes=['a', ...], out_axes=[{}, {1: 'a'}],
+    fm = xmap(f, in_axes=['a', ...], out_axes=({}, {1: 'a'}),
               axis_resources={'a': ('x', 'y')})
     vshape = (4, 5)
     v = jnp.arange(np.prod(vshape)).reshape(vshape)
@@ -333,14 +353,14 @@ class XMapTest(XMapTestCase):
     if devices.size < 2:
       raise SkipTest("Test requires 2 devices")
     x = np.arange(8).reshape((2, 2, 2))
-    with mesh(devices, ('x',)):
+    with maps.Mesh(devices, ('x',)):
       python_should_be_executing = True
       xmap(f, in_axes=['a', ...], out_axes=['a', ...],
            axis_resources={'a': 'x'})(x)
       python_should_be_executing = False
       xmap(f, in_axes=['a', ...], out_axes=['a', ...],
            axis_resources={'a': 'x'})(x)
-    with mesh(devices, ('x',)):
+    with maps.Mesh(devices, ('x',)):
       python_should_be_executing = False
       xmap(f, in_axes=['a', ...], out_axes=['a', ...],
            axis_resources={'a': 'x'})(x)
@@ -361,19 +381,19 @@ class XMapTest(XMapTestCase):
                axis_resources=dict([axis_resources[1]]))
       def h(y):
         # Multiply by a constant array to better exercise the partial_eval rule
-        return jnp.sin(y) * np.arange(y.size), lax.psum(y, ('a', 'b'))
+        return jnp.sin(y) * np.arange(y.size, dtype=float), lax.psum(y, ('a', 'b'))
       return h(y)
 
     xshape = (4, 2, 5)
-    x = jnp.arange(np.prod(xshape)).reshape(xshape)
+    x = jnp.arange(np.prod(xshape), dtype=float).reshape(xshape)
     y = f(x)
-    self.assertAllClose(y, ((jnp.sin(x * 2) * np.arange(xshape[-1])).transpose((1, 2, 0)), (x * 2).sum((0, 1))))
+    self.assertAllClose(y, ((jnp.sin(x * 2) * np.arange(xshape[-1], dtype=float)[None, None]).transpose((1, 2, 0)), (x * 2).sum((0, 1))))
     self.assertEqual(y[0].sharding_spec.sharding,
                      (pxla.Chunked([2]), pxla.NoSharding(), pxla.NoSharding()))
     self.assertEqual(y[0].sharding_spec.mesh_mapping,
                      (pxla.Replicated(2), pxla.ShardedAxis(0)) + (pxla.Replicated(2),) * (len(mesh) - 2))
-    if maps.EXPERIMENTAL_SPMD_LOWERING:
-      hlo = jax.xla_computation(f)(x).as_hlo_text()
+    if config.experimental_xmap_spmd_lowering:
+      hlo = f.lower(x).compiler_ir(dialect="hlo").as_hlo_text()
       # Make sure that there are non-partial sharding specs in the HLO
       self.assertRegex(hlo, r"sharding={devices=\[[0-9,]+\][0-9,]+}")
 
@@ -408,6 +428,23 @@ class XMapTest(XMapTestCase):
     y = shard(jnp.ones((2, 5)) * 2)
     f(x, y)
     self.assertNotDeleted(y)
+    self.assertDeleted(x)
+
+  @jtu.skip_on_devices("cpu")  # In/out aliasing not supported on CPU.
+  @jtu.with_mesh([('x', 2)])
+  @jtu.ignore_warning(category=UserWarning,  # SPMD test generates warning.
+                      message="Some donated buffers were not usable*")
+  def testBufferDonationNamedShape(self):
+    axis_resources = {'i': 'x'}
+    # named in_aval, unnamed out_aval
+    f = xmap(lambda _: jnp.ones((2, 5)),
+             in_axes=['i', ...], out_axes=[...],
+             axis_resources=axis_resources,
+             donate_argnums=0)
+    shard = xmap(lambda x: x, in_axes=['i', ...], out_axes=['i', ...],
+                 axis_resources=dict(axis_resources))
+    x = shard(jnp.zeros((4, 5)))
+    f(x)
     self.assertDeleted(x)
 
   def testControlFlow(self):
@@ -510,18 +547,31 @@ class XMapTest(XMapTestCase):
     fm = do_vmap(xmap(f, in_axes=xmap_in_axes, out_axes=xmap_out_axes))
     fref = partial(jnp.einsum, f"{''.join(xind)},{''.join(yind)}->{''.join(zind)}")
 
-    rng = np.random.RandomState(0)
+    rng = self.rng()
     x = rng.randn(*xshape)
     y = rng.randn(*yshape)
     self.assertAllClose(fm(x, y), fref(x, y))
 
-  def testJVP(self):
+  def testAutodiffBroadcast(self):
     f = xmap(lambda x, y: jnp.cos(lax.dot(x, jnp.sin(y),
                                           precision=lax.Precision.HIGHEST)),
-             in_axes=[['i', ...], {}], out_axes=['i', ...])
+             in_axes=(['i', ...], {}), out_axes=['i', ...])
     x = jnp.arange(12, dtype=jnp.float32).reshape((3, 4)) / 100
     y = jnp.arange(20, dtype=jnp.float32).reshape((4, 5)) / 100
     jtu.check_grads(f, (x, y), order=2, modes=['fwd'])
+    jtu.check_grads(f, (x, y), order=1, modes=['rev'])
+    with self.assertRaises(AssertionError):
+      # Second order reverse-mode differentiations seems to be broken,
+      # likely due to the transpose of psum being defined incorrectly.
+      jtu.check_grads(f, (x, y), order=2, modes=['rev'])
+
+  def testAutodiffNoBroadcast(self):
+    f = xmap(lambda x, y: jnp.cos(lax.dot(x, jnp.sin(y),
+                                          precision=lax.Precision.HIGHEST)),
+             in_axes=(['i', ...], [None, 'i']), out_axes=['i'])
+    x = jnp.arange(12, dtype=jnp.float32).reshape((3, 4)) / 100
+    y = jnp.arange(12, dtype=jnp.float32).reshape((4, 3)) / 100
+    jtu.check_grads(f, (x, y), order=2)
 
   @jtu.with_and_without_mesh
   def testNamedShape(self, mesh, axis_resources):
@@ -576,6 +626,61 @@ class XMapTest(XMapTestCase):
               axis_resources={'i': ('x', SerialLoop(4))})(x)
     self.assertAllClose(y, x + 4)
 
+  def testLowerWithAbstractArgs(self):
+    x = jax.ShapeDtypeStruct((2, 2), jnp.float32)
+    # Make sure this doesn't crash
+    xmap(lambda x: x + 4, in_axes=['i', ...], out_axes=['i', ...]).lower(x)
+
+  def testLowerCompile(self):
+    f = xmap(lambda x: x + 4, in_axes=['i', ...], out_axes=['i', ...])
+    x = jnp.arange(4, dtype=jnp.float32).reshape((2, 2))
+    f_exe = f.lower(x).compile()
+    self.assertAllClose(f_exe(x), f(x))
+
+  def testLowerCompileInTreeMismatch(self):
+    f = xmap(lambda x: x + 4, in_axes=['i', ...], out_axes=['i', ...])
+    x = jnp.arange(4, dtype=jnp.float32).reshape((2, 2))
+    f_exe = f.lower(x).compile()
+    self.assertRaisesRegex(
+        TypeError, "function compiled for .*, called with .*",
+        lambda: f_exe([x]))
+
+  def testLowerCompileArgTypeMismatch(self):
+    f = xmap(lambda x: x + 4, in_axes=['i', ...], out_axes=['i', ...])
+    x = jnp.arange(4, dtype=jnp.float32).reshape((2, 2))
+    x_f32 = x.astype(jnp.float32)
+    x_i32 = x.astype(jnp.int32)
+    f_exe = f.lower(x_f32).compile()
+    self.assertRaisesRegex(
+        TypeError,
+        "Computation compiled for input types:\n.*float32.*\n"
+        "called with:\n.*int32.*",
+        lambda: f_exe(x_i32))
+
+  def testLowerCompilerIR(self):
+    f = xmap(lambda x: x + 4, in_axes=['i', ...], out_axes=['i', ...])
+    x = jnp.arange(4, dtype=jnp.float32).reshape((2, 2))
+    f = f.lower(x)
+    self.assertIsNotNone(f.compiler_ir())
+    self.assertIsNotNone(f.compiler_ir(dialect='hlo'))
+    self.assertIsNotNone(f.compiler_ir(dialect='mhlo'))
+
+  def testLowerCompileCompilerIR(self):
+    f = xmap(lambda x: x + 4, in_axes=['i', ...], out_axes=['i', ...])
+    x = jnp.arange(4, dtype=jnp.float32).reshape((2, 2))
+    f = f.lower(x).compile()
+    self.assertIsNotNone(f.compiler_ir())
+
+  def testLowerCompileExecutable(self):
+    f = xmap(lambda x: x + 4, in_axes=['i', ...], out_axes=['i', ...])
+    x = jnp.arange(4, dtype=jnp.float32).reshape((2, 2))
+    f = f.lower(x).compile()
+    self.assertIsNotNone(f.runtime_executable())
+
+  def testNewCheckpoint(self):
+    f = checkpoint(xmap(lambda x: x, in_axes=['i', ...], out_axes=['i', ...]))
+    self.assertAllClose(jax.grad(lambda x: f(x).sum())(jnp.arange(3.)), jnp.ones(3))
+
 
 class XMapTestSPMD(SPMDTestMixin, XMapTest):
   """Re-executes all basic tests with the SPMD partitioner enabled"""
@@ -592,20 +697,73 @@ class XMapTestSPMD(SPMDTestMixin, XMapTest):
 
   @jtu.with_mesh([('x', 2), ('y', 2), ('z', 2)])
   def testNestedMeshSPMD(self):
-    h = xmap(lambda y: (jnp.sin(y) * np.arange(y.size), lax.psum(y, ('a', 'b', 'c'))),
+    h = xmap(lambda y: (jnp.sin(y) * np.arange(y.size, dtype=float),
+                        lax.psum(y, ('a', 'b', 'c'))),
              in_axes={0: 'c'}, out_axes=({1: 'c'}, {}),
              axis_resources={'c': 'z'})
     f = xmap(lambda x: h(x * 2),
              in_axes=[None, 'a', 'b', ...], out_axes=(['a', 'b', ...], {}),
              axis_resources={'a': 'x', 'b': 'y'})
     xshape = (8, 2, 4, 5)
-    x = jnp.arange(np.prod(xshape)).reshape(xshape)
-    y = f(x)
-    hlo = jax.xla_computation(f)(x).as_hlo_text()
+    x = jnp.arange(np.prod(xshape), dtype=float).reshape(xshape)
+    hlo = f.lower(x).compiler_ir(dialect="hlo").as_hlo_text()
     match = re.search(r"sharding={devices=\[([0-9,]+)\][0-9,]+}", hlo)
     self.assertIsNot(match, None)
     tile_factors = [int(s) for s in match.group(1).split(',')]
     self.assertEqual(set(tile_factors), {1, 2})
+
+  @jtu.with_mesh([('x', 2)])
+  def testFixedSharding(self):
+    # TODO(apaszke): Add support for extracting XLA computations generated by
+    # xmap and make this less of a smoke test.
+    try:
+      config.update("experimental_xmap_ensure_fixed_sharding", True)
+      f = xmap(lambda x: jnp.sin(2 * jnp.sum(jnp.cos(x) + 4, 'i')),
+               in_axes=['i'], out_axes={}, axis_resources={'i': 'x'})
+      x = jnp.arange(20, dtype=jnp.float32)
+      f(x)
+    finally:
+      config.update("experimental_xmap_ensure_fixed_sharding", False)
+
+
+class XMapTestManualSPMD(ManualSPMDTestMixin, XMapTestCase):
+  @jtu.with_mesh([('x', 2)])
+  def testBasic(self):
+    f = lambda x: jnp.sin(jnp.cos(x) + x) * x
+    fx = xmap(f, in_axes=['i'], out_axes=['i'], axis_resources={'i': 'x'})
+    x = jnp.arange(20, dtype=jnp.float32)
+    self.assertAllClose(fx(x), f(x))
+
+  @jtu.with_mesh([('x', 2)])
+  def testReplicated(self):
+    # TODO(apaszke): This seems to be failing if I try to have a replicated and a mapped argument?
+    f = lambda x: jnp.sin(jnp.cos(x) + x) * x
+    fx = xmap(f, in_axes=[...], out_axes=[...], axis_sizes={'i': 4}, axis_resources={'i': 'x'})
+    x = jnp.arange(20, dtype=jnp.float32)
+    self.assertAllClose(fx(x), f(x))
+
+  @jtu.with_mesh([('x', 2), ('y', 1)])
+  def testInPJit(self):
+    f = xmap(lambda x: jnp.sin(x) + x, in_axes=['i'], out_axes=['i'], axis_resources={'i': 'x'})
+    h = pjit(lambda x: f(x * x) + x, in_axis_resources=P('y'), out_axis_resources=None)
+    x = jnp.arange(20, dtype=jnp.float32)
+    self.assertAllClose(h(x), jnp.sin(x * x) + x * x + x)
+
+  @jtu.with_mesh([('x', 2), ('y', 1)])
+  def testInPJitReplicated(self):
+    f = xmap(lambda x: jnp.sin(x) + x, in_axes={}, out_axes={}, axis_sizes={'i': 4}, axis_resources={'i': 'x'})
+    h = pjit(lambda x: f(x * x) + x, in_axis_resources=P('y'), out_axis_resources=None)
+    x = jnp.arange(20, dtype=jnp.float32)
+    self.assertAllClose(h(x), jnp.sin(x * x) + x * x + x)
+
+  @jtu.with_mesh([('x', 2), ('y', 1)])
+  def testNestedConstraint(self):
+    # TODO(b/219691408): Using P('y') instead of P() causes an XLA crash!
+    fimpl = lambda x: with_sharding_constraint(jnp.sin(x), P()) + x
+    f = xmap(fimpl, in_axes=['i', ...], out_axes=['i', ...], axis_resources={'i': 'x'})
+    h = pjit(lambda x: f(x * x) + x, in_axis_resources=P('y'), out_axis_resources=None)
+    x = jnp.arange(20, dtype=jnp.float32).reshape(4, 5)
+    self.assertAllClose(h(x), jnp.sin(x * x) + x * x + x)
 
 
 class NamedNumPyTest(XMapTestCase):
@@ -619,7 +777,6 @@ class NamedNumPyTest(XMapTestCase):
     for mapped_axis in range(3)))
   def testReductions(self, reduction, axes, mapped_axis):
     axes_t = axes if isinstance(axes, tuple) else (axes,)
-    reduces_i = 'i' in axes_t
     ref_red = partial(reduction,
                       axis=tuple(mapped_axis if a == 'i' else a + (a >= mapped_axis)
                                  for a in axes_t))
@@ -629,7 +786,7 @@ class NamedNumPyTest(XMapTestCase):
                     in_axes={mapped_axis: 'i'},
                     out_axes=({} if 'i' in axes_t else {mapped_axis_after_red: 'i'}))
 
-    rng = np.random.RandomState(0)
+    rng = self.rng()
     x = rng.randn(2, 5, 6)
     self.assertAllClose(ref_red(x), xmap_red(x))
 
@@ -682,23 +839,23 @@ class NamedRandomTest(XMapTestCase):
 class NamedNNTest(XMapTestCase):
 
   def testOneHot(self):
-    f = xmap(lambda x: jax.nn.one_hot([1, 2, 0], 3, axis='i'),
+    f = xmap(lambda x: jax.nn.one_hot(jnp.array([1, 2, 0], dtype='int32'), 3, axis='i'),
              in_axes=['i', ...], out_axes=['i', ...])
     expected = jnp.array([[0., 1., 0.],
-                         [0., 0., 1.],
-                         [1., 0., 0.]]).T
-    self.assertAllClose(f(jnp.ones((3,))), expected)
+                          [0., 0., 1.],
+                          [1., 0., 0.]]).T
+    self.assertAllClose(f(jnp.ones(3, dtype='int32')), expected)
 
   def testOneHotOutOfBound(self):
-    f = xmap(lambda x: jax.nn.one_hot([-1, 3], 3, axis='i'),
+    f = xmap(lambda x: jax.nn.one_hot(jnp.array([-1, 3], dtype='int32'), 3, axis='i'),
              in_axes=['i', ...], out_axes=['i', ...])
-    self.assertAllClose(f(jnp.ones((3,))), jnp.zeros((3, 2)))
+    self.assertAllClose(f(jnp.ones(3, dtype='int32')), jnp.zeros((3, 2)))
 
   def testOneHotAxisSizeMismatch(self):
-    f = xmap(lambda x: jax.nn.one_hot([-1, 3], 3, axis='i'),
+    f = xmap(lambda x: jax.nn.one_hot(jnp.array([-1, 3], dtype='int32'), 3, axis='i'),
              in_axes=['i', ...], out_axes=['i', ...])
     with self.assertRaisesRegex(ValueError, "to match the size of axis i, but 3 != 5"):
-      f(jnp.ones((5,)))
+      f(jnp.ones(5, dtype='int32'))
 
   @parameterized.named_parameters(jtu.cases_from_list(
     {"testcase_name": f"_map_in={map_in}_map_out={map_out}_fan={fan}_distr={distr}",
@@ -711,11 +868,11 @@ class NamedNNTest(XMapTestCase):
     shape = (80, 50, 7)
     fan_in, fan_out = jax._src.nn.initializers._compute_fans(
         NamedShape(*shape), 0, 1)
-    key = jax.random.PRNGKey(0)
+    key = jax.random.PRNGKey(1)
     base_scaling = partial(jax.nn.initializers.variance_scaling, 100, fan, distr)
     ref_sampler = lambda: base_scaling(in_axis=0, out_axis=1)(key, shape)
     if map_in and map_out:
-      out_axes=['i', 'o', ...]
+      out_axes = ['i', 'o', ...]
       named_shape = NamedShape(shape[2], i=shape[0], o=shape[1])
       xmap_sampler = lambda: base_scaling(in_axis='i', out_axis='o')(key, named_shape)
     elif map_in:
@@ -733,6 +890,236 @@ class NamedNNTest(XMapTestCase):
                         atol=1e-4, rtol=2e-2)
 
 
+class XMapGDATest(XMapTestCase):
+
+  @jtu.with_mesh([('x', 4), ('y', 2)])
+  def test_basic(self):
+    global_mesh = jtu.create_global_mesh((4, 2), ('x', 'y'))
+    global_input_shape = (8, 2)
+    mesh_axes = P('x', 'y')
+    input_data = np.arange(
+        prod(global_input_shape)).reshape(global_input_shape)
+    def cb(index):
+      return input_data[index]
+
+    gda_obj = global_device_array.GlobalDeviceArray.from_callback(
+        global_input_shape, global_mesh, mesh_axes, cb)
+
+    with jax._src.config.parallel_functions_output_gda(True):
+      f = maps.xmap(
+            lambda x: x,
+            in_axes=({0: "a", 1: "b"}),
+            out_axes=({0: "a", 1: "b"}),
+            axis_resources={"a": "x", "b": "y"})
+
+      out = f(gda_obj)
+      self.assertIsInstance(out, global_device_array.GlobalDeviceArray)
+      self.assertEqual(out.shape, (8, 2))
+      self.assertEqual(out.local_shards[0].data.shape, (2, 1))
+      self.assertDictEqual(out.mesh.shape, {'x': 4, 'y': 2})
+      for s in out.local_shards:
+        self.assertArraysEqual(s.data, input_data[s.index])
+
+  @jtu.with_mesh([('x', 4), ('y', 2)])
+  def test_xmap_gda_mixed_inputs(self):
+    global_mesh = jtu.create_global_mesh((4, 2), ('x', 'y'))
+    global_input_shape = (8, 2)
+    mesh_axes = P('x')
+    input_data = np.arange(
+        prod(global_input_shape)).reshape(global_input_shape)
+    def cb(index):
+      return input_data[index]
+
+    gda_obj = global_device_array.GlobalDeviceArray.from_callback(
+        global_input_shape, global_mesh, mesh_axes, cb)
+
+    with jax._src.config.parallel_functions_output_gda(True):
+      f = maps.xmap(
+            lambda x, y: (x @ x.T, y @ y.T),
+            in_axes=({0: "a"}, ["c", ...]),
+            out_axes=({0: "a"}, ["c", ...]),
+            axis_resources={"a": "x", "c": "x"})
+
+      expected_matrix_mul = np.diagonal(input_data @ input_data.T)
+      out1, out2 = f(gda_obj, input_data)
+
+      self.assertIsInstance(out1, global_device_array.GlobalDeviceArray)
+      self.assertEqual(out1.shape, (8,))
+      self.assertEqual(out1.local_shards[0].data.shape, (2,))
+      self.assertDictEqual(out1.mesh.shape, {'x': 4, 'y': 2})
+      for s in out1.local_shards:
+        self.assertArraysEqual(s.data, expected_matrix_mul[s.index])
+
+      self.assertIsInstance(out2, global_device_array.GlobalDeviceArray)
+      self.assertEqual(out2.shape, (8,))
+      self.assertEqual(out2.local_shards[0].data.shape, (2,))
+      self.assertDictEqual(out2.mesh.shape, {'x': 4, 'y': 2})
+      for s in out2.local_shards:
+        self.assertArraysEqual(s.data, expected_matrix_mul[s.index])
+
+      for i, j in safe_zip(out1.local_shards, out2.local_shards):
+        self.assertArraysEqual(i.data, j.data)
+
+  @jtu.with_mesh([('x', 4), ('y', 2)])
+  def test_xmap_gda_double_input(self):
+    global_mesh = jtu.create_global_mesh((4, 2), ('x', 'y'))
+    global_input_shape = (8, 2)
+    input_data = np.arange(
+        prod(global_input_shape)).reshape(global_input_shape)
+    def cb(index):
+      return input_data[index]
+
+    gda_obj1 = global_device_array.GlobalDeviceArray.from_callback(
+        global_input_shape, global_mesh, P('x'), cb)
+    gda_obj2 = global_device_array.GlobalDeviceArray.from_callback(
+        global_input_shape, global_mesh, P('y'), cb)
+
+    with jax._src.config.parallel_functions_output_gda(True):
+      f = maps.xmap(
+            lambda x, y: (x @ x.T, y @ y.T),
+            in_axes=({0: "a"}, ["c", ...]),
+            out_axes=({0: "a"}, ["c", ...]),
+            axis_resources={"a": "x", "c": "y"})
+
+      expected_matrix_mul = np.diagonal(input_data @ input_data.T)
+      out1, out2 = f(gda_obj1, gda_obj2)
+
+      self.assertIsInstance(out1, global_device_array.GlobalDeviceArray)
+      self.assertEqual(out1.shape, (8,))
+      self.assertEqual(out1.local_shards[0].data.shape, (2,))
+      self.assertDictEqual(out1.mesh.shape, {'x': 4, 'y': 2})
+      for s in out1.local_shards:
+        self.assertArraysEqual(s.data, expected_matrix_mul[s.index])
+
+      self.assertIsInstance(out2, global_device_array.GlobalDeviceArray)
+      self.assertEqual(out2.shape, (8,))
+      self.assertEqual(out2.local_shards[0].data.shape, (4,))
+      self.assertDictEqual(out2.mesh.shape, {'x': 4, 'y': 2})
+      for s in out2.local_shards:
+        self.assertArraysEqual(s.data, expected_matrix_mul[s.index])
+
+  @jtu.with_mesh([('x', 4), ('y', 2)])
+  def test_xmap_gda_sharding_mismatch(self):
+    global_mesh = jtu.create_global_mesh((4, 2), ('x', 'y'))
+    global_input_shape = (8, 2)
+    mesh_axes = P('x', 'y')
+    input_data = np.arange(
+        prod(global_input_shape)).reshape(global_input_shape)
+    def cb(index):
+      return input_data[index]
+
+    gda_obj = global_device_array.GlobalDeviceArray.from_callback(
+        global_input_shape, global_mesh, mesh_axes, cb)
+
+    with jax._src.config.parallel_functions_output_gda(True):
+      f = maps.xmap(
+            lambda x: x @ x.T,
+            in_axes=({0: "a"}),
+            out_axes=({0: "a"}),
+            axis_resources={"a": "x"})
+      with self.assertRaisesRegex(
+          ValueError,
+          ('Got an input GDA to xmap with different partitioning than '
+           'specified in xmap. The partitioning must match.')):
+        f(gda_obj)
+
+
+class XMapArrayTest(XMapTestCase):
+
+  def test_basic(self):
+    global_mesh = jtu.create_global_mesh((4, 2), ('x', 'y'))
+    global_input_shape = (8, 2)
+    mesh_axes = P('x', 'y')
+    input_array, input_data = create_array(global_input_shape, global_mesh,
+                                           mesh_axes)
+
+    with jax._src.config.jax_array(True):
+      with global_mesh:
+        f = maps.xmap(
+              lambda x: x,
+              in_axes=({0: "a", 1: "b"}),
+              out_axes=({0: "a", 1: "b"}),
+              axis_resources={"a": "x", "b": "y"})
+
+        out = f(input_array)
+        self.assertIsInstance(out, array.Array)
+        self.assertEqual(out.shape, (8, 2))
+        self.assertEqual(out.addressable_shards[0].data.shape, (2, 1))
+        self.assertDictEqual(out.sharding.mesh.shape, {'x': 4, 'y': 2})
+        for s in out.addressable_shards:
+          self.assertArraysEqual(s.data._arrays[0], input_data[s.index])
+
+  def test_xmap_array_mixed_inputs(self):
+    global_mesh = jtu.create_global_mesh((4, 2), ('x', 'y'))
+    global_input_shape = (8, 2)
+    mesh_axes = P('x')
+    input_array, input_data = create_array(global_input_shape, global_mesh,
+                                           mesh_axes)
+
+    with jax._src.config.jax_array(True):
+      with global_mesh:
+        f = maps.xmap(
+              lambda x, y: (x @ x.T, y @ y.T),
+              in_axes=({0: "a"}, ["c", ...]),
+              out_axes=({0: "a"}, ["c", ...]),
+              axis_resources={"a": "x", "c": "x"})
+        with self.assertRaisesRegex(
+            ValueError, ('All arguments to pjit when `config.jax_array` is '
+                         'enabled should be `Array`s.')):
+          f(input_array, input_data)
+
+  def test_xmap_array_double_input(self):
+    global_mesh = jtu.create_global_mesh((4, 2), ('x', 'y'))
+    global_input_shape = (8, 2)
+    a1, input_data = create_array(global_input_shape, global_mesh, P('x'))
+    a2, _ = create_array(global_input_shape, global_mesh, P('y'))
+
+    with jax._src.config.jax_array(True):
+      with global_mesh:
+        f = maps.xmap(
+              lambda x, y: (x @ x.T, y @ y.T),
+              in_axes=({0: "a"}, ["c", ...]),
+              out_axes=({0: "a"}, ["c", ...]),
+              axis_resources={"a": "x", "c": "y"})
+
+        expected_matrix_mul = np.diagonal(input_data @ input_data.T)
+        out1, out2 = f(a1, a2)
+
+        self.assertIsInstance(out1, array.Array)
+        self.assertEqual(out1.shape, (8,))
+        self.assertEqual(out1.addressable_shards[0].data.shape, (2,))
+        self.assertDictEqual(out1.sharding.mesh.shape, {'x': 4, 'y': 2})
+        for s in out1.addressable_shards:
+          self.assertArraysEqual(s.data._arrays[0], expected_matrix_mul[s.index])
+
+        self.assertIsInstance(out2, array.Array)
+        self.assertEqual(out2.shape, (8,))
+        self.assertEqual(out2.addressable_shards[0].data.shape, (4,))
+        self.assertDictEqual(out2.sharding.mesh.shape, {'x': 4, 'y': 2})
+        for s in out2.addressable_shards:
+          self.assertArraysEqual(s.data._arrays[0], expected_matrix_mul[s.index])
+
+  def test_xmap_array_sharding_mismatch(self):
+    global_mesh = jtu.create_global_mesh((4, 2), ('x', 'y'))
+    global_input_shape = (8, 2)
+    mesh_axes = P('x', 'y')
+    input_array, _ = create_array(global_input_shape, global_mesh,
+                                           mesh_axes)
+
+    with jax._src.config.jax_array(True):
+      with global_mesh:
+        f = maps.xmap(
+              lambda x: x @ x.T,
+              in_axes=({0: "a"}),
+              out_axes=({0: "a"}),
+              axis_resources={"a": "x"})
+        with self.assertRaisesRegex(
+            ValueError,
+            ('Got an input Array to xmap with different partitioning than '
+             'specified in xmap. The partitioning must match.')):
+          f(input_array)
+
+
 class NewPrimitiveTest(XMapTestCase):
 
   def testGatherPositional(self):
@@ -745,7 +1132,7 @@ class NewPrimitiveTest(XMapTestCase):
 
   @jtu.with_and_without_mesh
   def testGather(self, mesh, axis_resources):
-    if axis_resources and not jax.experimental.maps.EXPERIMENTAL_SPMD_LOWERING:
+    if axis_resources and not config.experimental_xmap_spmd_lowering:
       raise SkipTest("pgather over mesh axes without SPMD lowering not implemented")
     x = jnp.arange(12, dtype=np.float32).reshape((4, 3))
     y = jnp.arange(35).reshape((5, 7)) % 3
@@ -868,11 +1255,11 @@ class PDotTests(XMapTestCase):
       return lax.pdot(x, y, 'i')
 
     f_mapped = xmap(f,
-                    in_axes=[{1: 'i'}, {0: 'i'}],
+                    in_axes=({1: 'i'}, {0: 'i'}),
                     out_axes={},
                     axis_resources={'i': 'r1'})
 
-    rng = np.random.RandomState(0)
+    rng = self.rng()
     x = rng.randn(3, 8)
     y = rng.randn(8, 5)
 
@@ -885,12 +1272,12 @@ class PDotTests(XMapTestCase):
     def f(x, y):
       return lax.pdot(x, y, 'i')
 
-    rng = np.random.RandomState(0)
+    rng = self.rng()
     x = rng.randn(2, 3, 8)
     y = rng.randn(2, 8, 5)
 
     f_mapped = xmap(f,
-                    in_axes=[{0: 'j', 2: 'i'}, {0: 'j', 1: 'i'}],
+                    in_axes=({0: 'j', 2: 'i'}, {0: 'j', 1: 'i'}),
                     out_axes=['j', ...],
                     axis_resources={'i': 'r1'})
 
@@ -903,12 +1290,12 @@ class PDotTests(XMapTestCase):
     def f(x, y):
       return lax.pdot(x, y, 'i')
 
-    rng = np.random.RandomState(0)
+    rng = self.rng()
     x = rng.randn(2, 3, 8)
     y = rng.randn(2, 8, 5)
 
     f_mapped = xmap(f,
-                    in_axes=[{0: 'j', 2: 'i'}, {0: 'j', 1: 'i'}],
+                    in_axes=({0: 'j', 2: 'i'}, {0: 'j', 1: 'i'}),
                     out_axes=['j', ...],
                     axis_resources={'j': 'r1'})
 
@@ -941,7 +1328,7 @@ class PDotTests(XMapTestCase):
                           pos_batch=pdot_spec.pos_batch_after_mapping,
                           pos_contract=pdot_spec.pos_contract_after_mapping)
 
-    fun = xmap(pdot_fun, in_axes=[pdot_spec.lhs_in_axes, pdot_spec.rhs_in_axes],
+    fun = xmap(pdot_fun, in_axes=(pdot_spec.lhs_in_axes, pdot_spec.rhs_in_axes),
                out_axes=[*pdot_spec.batch_names, ...],
                axis_resources=axis_resources)
 
@@ -984,8 +1371,8 @@ class PDotTests(XMapTestCase):
       return pdot_vjp(out_bar)
 
     fun = xmap(pdot_fun,
-               in_axes=[pdot_spec.lhs_in_axes, pdot_spec.rhs_in_axes,
-                        [*pdot_spec.batch_names, ...]],
+               in_axes=(pdot_spec.lhs_in_axes, pdot_spec.rhs_in_axes,
+                        [*pdot_spec.batch_names, ...]),
                out_axes=(pdot_spec.lhs_in_axes, pdot_spec.rhs_in_axes),
                axis_resources=axis_resources)
 
@@ -999,7 +1386,7 @@ class PDotTests(XMapTestCase):
                         atol=tol, rtol=tol)
 
   def test_xeinsum_vector_dot(self):
-    rng = np.random.RandomState(0)
+    rng = self.rng()
     x = rng.randn(3)
     y = rng.randn(3)
     out = xmap(partial(jnp.einsum, '{i},{i}->'),
@@ -1008,7 +1395,7 @@ class PDotTests(XMapTestCase):
     self.assertAllClose(out, expected, check_dtypes=False)
 
   def test_xeinsum_outer_product(self):
-    rng = np.random.RandomState(0)
+    rng = self.rng()
     x = rng.randn(3)
     y = rng.randn(3)
     out = xmap(partial(jnp.einsum, '{i},{j}->{i,j}'),
@@ -1017,7 +1404,7 @@ class PDotTests(XMapTestCase):
     self.assertAllClose(out, expected, check_dtypes=True)
 
   def test_xeinsum_matmul(self):
-    rng = np.random.RandomState(0)
+    rng = self.rng()
     x = rng.randn(3, 4)
     y = rng.randn(4, 5)
 
@@ -1036,7 +1423,7 @@ class PDotTests(XMapTestCase):
     check('{j},{j}->{}')
 
   def test_xeinsum_no_named_axes_vector_dot(self):
-    rng = np.random.RandomState(0)
+    rng = self.rng()
     x = rng.randn(3)
     y = rng.randn(3)
     out = jnp.einsum('i,i->', x, y, _use_xeinsum=True)
@@ -1044,20 +1431,130 @@ class PDotTests(XMapTestCase):
     self.assertAllClose(out, expected, check_dtypes=False)
 
   def test_xeinsum_no_named_axes_batch_vector_dot(self):
-    rng = np.random.RandomState(0)
+    rng = self.rng()
     x = rng.randn(3, 2)
     y = rng.randn(3, 2)
     out = jnp.einsum('ij,ij->i', x, y, _use_xeinsum=True)
     expected = np.einsum('ij,ij->i', x, y)
     self.assertAllClose(out, expected, check_dtypes=True)
 
-  def test_xeinsum_no_named_axes_reduce_sum(self):
+  def test_xeinsum_no_named_axes_batch_matmul(self):
     rng = np.random.RandomState(0)
+    x = rng.randn(3, 5, 4)
+    y = rng.randn(3, 4, 2)
+    out = jnp.einsum('bij,bjk->bik', x, y, _use_xeinsum=True)
+    expected = np.einsum('bij,bjk->bik', x, y)
+    tol = 1e-1 if jtu.device_under_test() == "tpu" else None
+    self.assertAllClose(out, expected, check_dtypes=True, atol=tol, rtol=tol)
+
+  def test_xeinsum_no_named_axes_reduce_sum(self):
+    rng = self.rng()
     x = rng.randn(3)
     y = rng.randn()
     out = jnp.einsum('i,->', x, y, _use_xeinsum=True)
     expected = np.einsum('i,->', x, y)
     self.assertAllClose(out, expected, check_dtypes=True)
+
+
+  def test_xeinsum_no_named_axes_reduce_and_contract(self):
+    rng = np.random.RandomState(0)
+    x = rng.randn(3, 5, 4)
+    y = rng.randn(2, 4, 2)
+    out = jnp.einsum('bij,cjk->ik', x, y, _use_xeinsum=True)
+    expected = np.einsum('bij,cjk->ik', x, y)
+    tol = 1e-1 if jtu.device_under_test() == "tpu" else None
+    self.assertAllClose(out, expected, check_dtypes=True, atol=tol, rtol=tol)
+
+  def test_xeinsum_named_axes_reduce(self):
+    rng = np.random.RandomState(0)
+    x = rng.randn(3, 4)
+    y = rng.randn(5,)
+
+    def check(spec):
+      out = xmap(partial(jnp.einsum, spec),
+                 in_axes=(['i', 'j'], ['k']),
+                 out_axes=['i', 'k'])(x, y)
+      expected = np.einsum('ij,k->ik', x, y)
+      tol = 1e-1 if jtu.device_under_test() == "tpu" else None
+      self.assertAllClose(out, expected, check_dtypes=True,
+                          atol=tol, rtol=tol)
+    check('{i,j},{k}->{i,k}')
+
+  @jtu.with_mesh([('x', 2), ('y', 2)])
+  def test_xeinsum_named_axes_reduce_with_mesh(self):
+    rng = np.random.RandomState(0)
+    x = rng.randn(6, 4)
+    y = rng.randn(8,)
+
+    def check(spec):
+      out = xmap(partial(jnp.einsum, spec),
+                 in_axes=(['i', 'j'], ['k']),
+                 out_axes=['i', 'k'],
+                 axis_resources={'i': 'x', 'k': 'y'})(x, y)
+      expected = np.einsum('ij,k->ik', x, y)
+      tol = 1e-1 if jtu.device_under_test() == "tpu" else None
+      self.assertAllClose(out, expected, check_dtypes=True,
+                          atol=tol, rtol=tol)
+
+    check('{i,j},{k}->{i,k}')
+    check('{i,j},{k}->{k,i}')  # order of named axes in the spec doesn't matter!
+    check('{j,i},{k}->{i,k}')
+    check('{j,i},{k}->{k,i}')
+
+  @jtu.with_mesh([('x', 2), ('y', 2)])
+  def test_xeinsum_named_axes_batch_matmul_with_mesh(self):
+    rng = np.random.RandomState(0)
+    x = rng.randn(8, 3, 4)
+    y = rng.randn(8, 4, 5)
+
+    def check(spec):
+      out = xmap(partial(jnp.einsum, spec),
+                 in_axes=(['b', 'i', 'j'], ['b', 'j', 'k']),
+                 out_axes=['b', 'i', 'k'],
+                 axis_resources={'b': 'x', 'j': 'y'})(x, y)
+      expected = np.einsum('bij,bjk->bik', x, y)
+      tol = 1e-1 if jtu.device_under_test() == "tpu" else None
+      self.assertAllClose(out, expected, check_dtypes=True,
+                          atol=tol, rtol=tol)
+
+    check('{b,i,j},{b,j,k}->{b,i,k}')
+    check('{j,i,b},{j,b,k}->{i,b,k}')  # order of named axes in the spec doesn't matter!
+
+  @jtu.with_mesh([('x', 2), ('y', 2)])
+  def test_xeinsum_named_axes_unary_reduce_with_mesh(self):
+    rng = np.random.RandomState(0)
+    x = rng.randn(8, 6, 4)
+
+    def check(spec):
+      out = xmap(partial(jnp.einsum, spec),
+                 in_axes=['b', 'i', 'j'],
+                 out_axes=['b'],
+                 axis_resources={'b': 'x', 'i': 'y'})(x)
+      expected = np.einsum('bij->b', x)
+      tol = 1e-1 if jtu.device_under_test() == "tpu" else None
+      self.assertAllClose(out, expected, check_dtypes=True,
+                          atol=tol, rtol=tol)
+
+    check('{b,i,j}->{b}')
+    check('{b,j,i}->{b}')  # order of named axes in the spec doesn't matter!
+    check('{i,j,b}->{b}')
+
+  @jtu.with_mesh([('x', 2), ('y', 2)])
+  def test_xeinsum_mixed_axes_unary_reduce_with_mesh(self):
+    rng = np.random.RandomState(0)
+    x = rng.randn(8, 6, 4, 5)
+
+    def check(spec):
+      out = xmap(partial(jnp.einsum, spec),
+                 in_axes=['b', 'i', ...],
+                 out_axes=['b', ...],
+                 axis_resources={'b': 'x', 'i': 'y'})(x)
+      expected = np.einsum('bijk->bk', x)
+      tol = 1e-1 if jtu.device_under_test() == "tpu" else None
+      self.assertAllClose(out, expected, check_dtypes=True,
+                          atol=tol, rtol=tol)
+
+    check('jk{i,b}->k{b}')
 
 
 class XMapErrorTest(jtu.JaxTestCase):
@@ -1067,14 +1564,23 @@ class XMapErrorTest(jtu.JaxTestCase):
     def f(v):
       return v * 4
     with self.assertRaisesRegex(ValueError, r"distinct resources.*specified \('x', 'x'\) for axis a"):
-      fxy = xmap(f, in_axes=['a', ...], out_axes=['a', ...],
-                 axis_resources={'a': ('x', 'x')})
+      xmap(f, in_axes=['a', ...], out_axes=['a', ...],
+           axis_resources={'a': ('x', 'x')})
+
+  @jtu.with_mesh([('y', 2)])
+  def testUndefinedAxisResource(self):
+    error = re.escape(
+        r"In-scope resources are insufficient to execute the xmapped function. "
+        r"The missing resources are: {'x'}")
+    with self.assertRaisesRegex(ValueError, error):
+      xmap(lambda x: x, in_axes=['a', ...], out_axes=['a', ...],
+           axis_resources={'a': 'x'})(jnp.zeros((4,)))
 
   @jtu.with_mesh([('x', 2)])
   def testNestedDifferentResources(self):
     @partial(xmap, in_axes={0: 'a'}, out_axes={0: 'a'}, axis_resources={'a': 'x'})
     def f(x):
-      with mesh(np.empty((), dtype=np.object_), ()):
+      with maps.Mesh(np.empty((), dtype=np.object_), ()):
         @partial(xmap, in_axes={0: 'b'}, out_axes={0: 'b'})
         def h(x):
           return x
@@ -1207,7 +1713,7 @@ class XMapErrorTest(jtu.JaxTestCase):
     f = xmap(lambda x: lax.axis_index('i') + x,
              in_axes=[], out_axes=['i'], axis_sizes={'i': 4}, axis_resources={'i': 'x'})
     h = xmap(f, in_axes=['j', ...], out_axes=['j', ...], axis_resources={'j': 'x'})
-    x = np.arange(4)
+    x = np.arange(4, dtype='int32')
     error = (r"Axes `i` and `j` are both mapped to the resource `x`, but they "
              r"coincide in the named_shape of a value returned from a primitive "
              r"add created at .*")
@@ -1249,6 +1755,117 @@ class XMapErrorTest(jtu.JaxTestCase):
              r"collectives\), but `i` violates that rule")
     with self.assertRaisesRegex(RuntimeError, error):
       fm(x)
+
+  def testAxesMismatch(self):
+    x = jnp.ones((4,))
+    p = [['x'], ['x'], ['x']]
+    xmap(lambda x: x, (p,), p)([x, x, x])  # OK
+    xmap(lambda x: x, [p], p)([x, x, x])  # OK
+    error = re.escape(
+        r"xmap in_axes specification must be a tree prefix of the "
+        r"corresponding value, got specification (['x'], ['x'], ['x']) for value "
+        r"tree PyTreeDef((*, *)). Note that xmap in_axes that are "
+        r"non-trivial pytrees should always be wrapped in a tuple representing "
+        r"the argument list.")
+    with self.assertRaisesRegex(ValueError, error):
+      xmap(lambda x, y: x, p, p)(x, x)  # Error, but make sure we hint at tupling
+    # TODO(apaszke): Disable implicit list casts and enable this
+    # error = re.escape(
+        # r"xmap in_axes specification must be a tree prefix of the "
+        # r"corresponding value, got specification (['x'], ['x'], ['x']) for value "
+        # r"tree PyTreeDef(([*, *, *],)). Note that xmap in_axes that "
+        # r"are non-trivial pytrees should always be wrapped in a tuple representing "
+        # r"the argument list. In particular, you're passing in a single argument "
+        # r"which means that xmap in_axes might need to be wrapped in a "
+        # r"singleton tuple.")
+    # with self.assertRaisesRegex(ValueError, error):
+      # xmap(lambda x: x, p, p)([x, x, x])  # Error, but make sure we hint at singleton tuple
+    error = re.escape(
+        r"xmap out_axes specification must be a tree prefix of the "
+        r"corresponding value, got specification ([['x'], ['x'], ['x']], ['x']) for "
+        r"value tree PyTreeDef([*, *, *]).")
+    with self.assertRaisesRegex(ValueError, error):
+      xmap(lambda x: x, (p,), (p, ['x']))([x, x, x])  # Error, we raise a generic tree mismatch message
+
+
+class NamedAutodiffTests(jtu.JaxTestCase):
+
+  def testVjpReduceAxes(self):
+    def f(w, x):
+      return jnp.sin(jnp.dot(x, w))
+
+    def vjp_f(w, x, gy):
+      _, pullback = jax.vjp(f, w, x)
+      return pullback(gy)
+
+    def vjp_f_reduced(w, x, gy):
+      _, pullback = jax.vjp(f, w, x, reduce_axes=('batch',))
+      return pullback(gy)
+
+    w = np.arange(12, dtype=np.float32).reshape(3, 4)
+    x = np.arange(6, dtype=np.float32).reshape(2, 3)
+    gy = np.arange(8, dtype=np.float32).reshape(2, 4)
+
+    # per-example
+    error = (r"One of xmap results has an out_axes specification of {}, but is "
+             r"actually mapped along more axes defined by this xmap call: "
+             r"batch")
+    with self.assertRaisesRegex(TypeError, error):
+      xmap(vjp_f,
+           in_axes=({}, {0: 'batch'}, {0: 'batch'}),
+           out_axes=({}, {0: 'batch'}))(w, x, gy)
+    out = xmap(vjp_f,
+               in_axes=({}, {0: 'batch'}, {0: 'batch'}),
+               out_axes=({0: 'batch'}, {0: 'batch'}))(w, x, gy)
+    expected = vmap(vjp_f, in_axes=(None, 0, 0), out_axes=(0, 0))(w, x, gy)
+    self.assertAllClose(out, expected, check_dtypes=True)
+
+    # reduced
+    out = xmap(vjp_f_reduced,
+               in_axes=({}, {0: 'batch'}, {0: 'batch'}),
+               out_axes=({}, {0: 'batch'}))(w, x, gy)
+    # the reduced VJP is also the VJP when using a positional batch axis
+    expected = vjp_f(w, x, gy)
+    self.assertAllClose(out, expected, check_dtypes=True)
+
+  def testVjpReduceAxesCollective(self):
+
+    # lax.psum has the wrong transpose, so test with a corrected version for now
+    @functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
+    def psum_idrev(x, axis_name: Optional[AxisNames] = None):
+      if axis_name is None:
+        return x
+      return jax.lax.psum(x, axis_name)
+
+    def psum_idrev_fwd(x, axis_name):
+      return psum_idrev(x, axis_name), None
+
+    def psum_idrev_bwd(axis_name, res, g):
+      del axis_name, res
+      return (g,)
+
+    psum_idrev.defvjp(psum_idrev_fwd, psum_idrev_bwd)
+
+    def f_named(w, x):
+      return psum_idrev(jnp.sin(jnp.dot(x, w)).sum(), 'batch')
+
+    def f_positional(w, x):
+      return jnp.sin(jnp.dot(x, w)).sum()
+
+    w = np.arange(12, dtype=np.float32).reshape(3, 4)
+    x = np.arange(6, dtype=np.float32).reshape(2, 3)
+
+    # forward
+    out = xmap(f_named, in_axes=({}, {0: 'batch'}), out_axes={})(w, x)
+    expected = f_positional(w, x)
+    self.assertAllClose(out, expected, check_dtypes=True)
+
+    # gradient
+    out = xmap(jax.grad(f_named, (0, 1), reduce_axes=('batch',)),
+               in_axes=({}, {0: 'batch'}),
+               out_axes=({}, {0: 'batch'}))(w, x)
+    expected = jax.grad(f_positional, (0, 1))(w, x)
+    self.assertAllClose(out, expected, check_dtypes=True)
 
 
 if __name__ == '__main__':

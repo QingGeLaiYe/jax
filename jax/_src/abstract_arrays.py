@@ -37,8 +37,10 @@ def make_shaped_array(x):
   return ShapedArray(np.shape(x), dtype)
 
 def zeros_like_array(x):
-  dtype = dtypes.canonicalize_dtype(dtypes.result_type(x))
-  return zeros_like_shaped_array(ShapedArray(np.shape(x), dtype))
+  dtype, weak_type = dtypes._lattice_result_type(x)
+  dtype = dtypes.canonicalize_dtype(dtype)
+  aval = ShapedArray(np.shape(x), dtype, weak_type=weak_type)
+  return ad_util.zeros_like_aval(aval)
 
 array_types = {np.ndarray, np.bool_,
                np.int8, np.int16, np.int32, np.int64,
@@ -47,28 +49,24 @@ array_types = {np.ndarray, np.bool_,
                np.complex64, np.complex128,
                np.longlong, np.intc}
 
+def canonical_concrete_aval(val, weak_type=None):
+  return ConcreteArray(dtypes.canonicalize_dtype(np.result_type(val)), val,
+                       weak_type=weak_type)
+
 for t in array_types:
-  core.pytype_aval_mappings[t] = ConcreteArray
+  core.pytype_aval_mappings[t] = canonical_concrete_aval
   ad_util.jaxval_zeros_likers[t] = zeros_like_array
-
-
-def zeros_like_shaped_array(aval):
-  assert isinstance(aval, ShapedArray)
-  if aval.dtype == dtypes.float0:
-    return np.zeros(aval.shape, dtypes.float0)
-  return np.broadcast_to(np.array(0, aval.dtype), aval.shape)
-
-ad_util.aval_zeros_likers[ShapedArray] = zeros_like_shaped_array
 
 core.literalable_types.update(array_types)
 
 def _zeros_like_python_scalar(t, x):
-  return np.array(0, dtypes.python_scalar_dtypes[t])
+  dtype = dtypes.canonicalize_dtype(dtypes.python_scalar_dtypes[t])
+  aval = core.ShapedArray((), dtype, weak_type=True)
+  return ad_util.zeros_like_aval(aval)
 
 def _make_concrete_python_scalar(t, x):
-  return ConcreteArray(
-    np.array(x, dtype=dtypes._scalar_type_to_dtype(t, x)),
-    weak_type=True)
+  dtype = dtypes._scalar_type_to_dtype(t, x)
+  return canonical_concrete_aval(np.array(x, dtype=dtype), weak_type=True)
 
 for t in dtypes.python_scalar_dtypes:
   core.pytype_aval_mappings[t] = partial(_make_concrete_python_scalar, t)

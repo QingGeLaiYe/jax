@@ -27,7 +27,7 @@ import unittest
 
 from absl.testing import absltest
 
-from jax import test_util as jtu
+from jax._src import test_util as jtu
 from jax.config import config
 
 import numpy as np
@@ -47,6 +47,7 @@ class JaxPrimitiveTest(jtu.JaxTestCase):
   # If you want to run this test for only one harness, add parameter
   # `one_containing="foo"` to parameterized below.
   @primitive_harness.parameterized(primitive_harness.all_harnesses,
+                                   #one_containing="gather_from_slicing_name",
                                    include_jax_unimpl=True)
   @jtu.ignore_warning(category=UserWarning,
                       message="Using reduced precision for gradient.*")
@@ -58,29 +59,30 @@ class JaxPrimitiveTest(jtu.JaxTestCase):
                               dtype=harness.dtype)]
     if any([lim.skip_run for lim in jax_unimpl]):
       logging.info(
-          f"Skipping run with expected JAX limitations: "
-          f"{[u.description for u in jax_unimpl]} in harness {harness.fullname}")
+          "Skipping run with expected JAX limitations: %s in harness %s",
+          [u.description for u in jax_unimpl], harness.fullname)
       return
     try:
       harness.dyn_fun(*harness.dyn_args_maker(self.rng()))
     except Exception as e:
       if jax_unimpl:
         logging.info(
-          f"Found expected JAX error {e} with expected JAX limitations: "
-          f"{[u.description for u in jax_unimpl]} in harness {harness.fullname}")
+          "Found expected JAX error %s with expected JAX limitations: "
+          "%s in harness %s",
+          e, [u.description for u in jax_unimpl], harness.fullname)
         return
       else:
         raise e
 
     if jax_unimpl:
-      msg = ("Found no JAX error but expected JAX limitations: "
-             f"{[u.description for u in jax_unimpl]} in harness: {harness.fullname}")
-      logging.warning(msg)
-      # We assert that we don't have too strict limitations. This assert can
-      # fail if somebody fixes a JAX or XLA limitation. In that case, you should
-      # find and remove the Limitation in primitive_harness. Alternatively,
-      # uncomment this assert and ping an OWNER of primitive_harness.
-      # self.assertEmpty(msg)
+      logging.warning("Found no JAX error but expected JAX limitations: %s in "
+                      "harness: %s",
+                      [u.description for u in jax_unimpl], harness.fullname)
+      # We do not fail the test if we have too many limitations. If you want
+      # to find extraneous limitations, uncomment this assert and run the test
+      # on all platforms.
+      # self.assertEmpty(("Found no JAX error but expected JAX limitations: "
+      #                  f"{[u.description for u in jax_unimpl]} in harness: {harness.fullname}"))
 
   def test_generate_primitives_coverage_doc(self):
     harnesses = primitive_harness.all_harnesses
@@ -90,7 +92,7 @@ class JaxPrimitiveTest(jtu.JaxTestCase):
 
     def unique_hash(h: primitive_harness.Harness, l: primitive_harness.Limitation):
       return (h.group_name, l.description, l.devices,
-              tuple([np.dtype(d).name for d in l.dtypes]))
+              tuple(np.dtype(d).name for d in l.dtypes))
 
     unique_limitations: Dict[Any, Tuple[primitive_harness.Harness,
                                         primitive_harness.Limitation]] = {}

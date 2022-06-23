@@ -19,9 +19,10 @@ from absl.testing import parameterized
 
 import numpy as np
 
-from jax import test_util as jtu
+from jax._src import test_util as jtu
 from jax import random
-from jax.experimental import stax
+from jax.example_libraries import stax
+from jax import dtypes
 
 from jax.config import config
 config.parse_flags_with_absl()
@@ -29,7 +30,7 @@ config.parse_flags_with_absl()
 
 def random_inputs(rng, input_shape):
   if type(input_shape) is tuple:
-    return rng.randn(*input_shape).astype(np.float32)
+    return rng.randn(*input_shape).astype(dtypes.canonicalize_dtype(np.float_))
   elif type(input_shape) is list:
     return [random_inputs(rng, shape) for shape in input_shape]
   else:
@@ -40,15 +41,17 @@ def _CheckShapeAgreement(test_case, init_fun, apply_fun, input_shape):
   rng_key = random.PRNGKey(0)
   rng_key, init_key = random.split(rng_key)
   result_shape, params = init_fun(init_key, input_shape)
-  inputs = random_inputs(np.random.RandomState(0), input_shape)
+  inputs = random_inputs(test_case.rng(), input_shape)
   result = apply_fun(params, inputs, rng=rng_key)
   test_case.assertEqual(result.shape, result_shape)
 
 
+# stax makes use of implicit rank promotion, so we allow it in the tests.
+@jtu.with_config(jax_numpy_rank_promotion="allow")
 class StaxTest(jtu.JaxTestCase):
 
   @parameterized.named_parameters(jtu.cases_from_list(
-      {"testcase_name": "_shape={}".format(shape), "shape": shape}
+      {"testcase_name": f"_shape={shape}", "shape": shape}
       for shape in [(2, 3), (5,)]))
   def testRandnInitShape(self, shape):
     key = random.PRNGKey(0)
@@ -56,7 +59,7 @@ class StaxTest(jtu.JaxTestCase):
     self.assertEqual(out.shape, shape)
 
   @parameterized.named_parameters(jtu.cases_from_list(
-      {"testcase_name": "_shape={}".format(shape), "shape": shape}
+      {"testcase_name": f"_shape={shape}", "shape": shape}
       for shape in [(2, 3), (2, 3, 4)]))
   def testGlorotInitShape(self, shape):
     key = random.PRNGKey(0)
@@ -154,7 +157,7 @@ class StaxTest(jtu.JaxTestCase):
     _CheckShapeAgreement(self, init_fun, apply_fun, input_shape)
 
   @parameterized.named_parameters(jtu.cases_from_list(
-      {"testcase_name": "_shape={}".format(input_shape),
+      {"testcase_name": f"_shape={input_shape}",
        "input_shape": input_shape}
       for input_shape in [(2, 3), (2, 3, 4)]))
   def testFlattenShape(self, input_shape):
@@ -162,7 +165,7 @@ class StaxTest(jtu.JaxTestCase):
     _CheckShapeAgreement(self, init_fun, apply_fun, input_shape)
 
   @parameterized.named_parameters(jtu.cases_from_list(
-      {"testcase_name": "_input_shape={}_spec={}".format(input_shape, i),
+      {"testcase_name": f"_input_shape={input_shape}_spec={i}",
        "input_shape": input_shape, "spec": spec}
       for input_shape in [(2, 5, 6, 1)]
       for i, spec in enumerate([
@@ -173,7 +176,7 @@ class StaxTest(jtu.JaxTestCase):
     _CheckShapeAgreement(self, init_fun, apply_fun, input_shape)
 
   @parameterized.named_parameters(jtu.cases_from_list(
-      {"testcase_name": "_input_shape={}".format(input_shape),
+      {"testcase_name": f"_input_shape={input_shape}",
        "input_shape": input_shape}
       for input_shape in [(3, 4), (2, 5, 6, 1)]))
   def testDropoutShape(self, input_shape):
@@ -181,7 +184,7 @@ class StaxTest(jtu.JaxTestCase):
     _CheckShapeAgreement(self, init_fun, apply_fun, input_shape)
 
   @parameterized.named_parameters(jtu.cases_from_list(
-      {"testcase_name": "_input_shape={}".format(input_shape),
+      {"testcase_name": f"_input_shape={input_shape}",
        "input_shape": input_shape}
       for input_shape in [(3, 4), (2, 5, 6, 1)]))
   def testFanInSum(self, input_shape):
@@ -189,7 +192,7 @@ class StaxTest(jtu.JaxTestCase):
     _CheckShapeAgreement(self, init_fun, apply_fun, [input_shape, input_shape])
 
   @parameterized.named_parameters(jtu.cases_from_list(
-      {"testcase_name": "_inshapes={}_axis={}".format(input_shapes, axis),
+      {"testcase_name": f"_inshapes={input_shapes}_axis={axis}",
        "input_shapes": input_shapes, "axis": axis}
       for input_shapes, axis in [
           ([(2, 3), (2, 1)], 1),
@@ -217,7 +220,7 @@ class StaxTest(jtu.JaxTestCase):
     axes = (0, 1, 2)
     init_fun, apply_fun = stax.BatchNorm(axis=axes, center=False, scale=False)
     input_shape = (4, 5, 6, 7)
-    inputs = random_inputs(np.random.RandomState(0), input_shape)
+    inputs = random_inputs(self.rng(), input_shape)
 
     out_shape, params = init_fun(key, input_shape)
     out = apply_fun(params, inputs)
@@ -230,7 +233,7 @@ class StaxTest(jtu.JaxTestCase):
     key = random.PRNGKey(0)
     init_fun, apply_fun = stax.BatchNorm(axis=(0, 1, 2))
     input_shape = (4, 5, 6, 7)
-    inputs = random_inputs(np.random.RandomState(0), input_shape)
+    inputs = random_inputs(self.rng(), input_shape)
 
     out_shape, params = init_fun(key, input_shape)
     out = apply_fun(params, inputs)
@@ -246,7 +249,7 @@ class StaxTest(jtu.JaxTestCase):
     # Regression test for https://github.com/google/jax/issues/461
     init_fun, apply_fun = stax.BatchNorm(axis=(0, 2, 3))
     input_shape = (4, 5, 6, 7)
-    inputs = random_inputs(np.random.RandomState(0), input_shape)
+    inputs = random_inputs(self.rng(), input_shape)
 
     out_shape, params = init_fun(key, input_shape)
     out = apply_fun(params, inputs)

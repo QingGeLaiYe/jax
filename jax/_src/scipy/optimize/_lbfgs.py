@@ -17,8 +17,8 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
-from jax import lax, ops
-from .line_search import line_search
+from jax import lax
+from jax._src.scipy.optimize.line_search import line_search
 
 _dot = partial(jnp.dot, precision=lax.Precision.HIGHEST)
 
@@ -155,13 +155,13 @@ def _minimize_lbfgs(
     )
 
     # evaluate at next iterate
-    s_k = ls_results.a_k * p_k
+    s_k = ls_results.a_k.astype(p_k.dtype) * p_k
     x_kp1 = state.x_k + s_k
     f_kp1 = ls_results.f_k
     g_kp1 = ls_results.g_k
     y_k = g_kp1 - state.g_k
     rho_k_inv = jnp.real(_dot(y_k, s_k))
-    rho_k = jnp.reciprocal(rho_k_inv)
+    rho_k = jnp.reciprocal(rho_k_inv).astype(y_k.dtype)
     gamma = rho_k_inv / jnp.real(_dot(jnp.conj(y_k), y_k))
 
     # replacements for next iteration
@@ -174,15 +174,16 @@ def _minimize_lbfgs(
 
     converged = jnp.linalg.norm(g_kp1, ord=norm) < gtol
 
+    # TODO(jakevdp): use a fixed-point procedure rather than type-casting?
     state = state._replace(
       converged=converged,
       failed=(status > 0) & (~converged),
       k=state.k + 1,
       nfev=state.nfev + ls_results.nfev,
       ngev=state.ngev + ls_results.ngev,
-      x_k=x_kp1,
-      f_k=f_kp1,
-      g_k=g_kp1,
+      x_k=x_kp1.astype(state.x_k.dtype),
+      f_k=f_kp1.astype(state.f_k.dtype),
+      g_k=g_kp1.astype(state.g_k.dtype),
       s_history=_update_history_vectors(history=state.s_history, new=s_k),
       y_history=_update_history_vectors(history=state.y_history, new=y_k),
       rho_history=_update_history_scalars(history=state.rho_history, new=rho_k),
@@ -197,6 +198,7 @@ def _minimize_lbfgs(
 
 
 def _two_loop_recursion(state: LBFGSResults):
+  dtype = state.rho_history.dtype
   his_size = len(state.rho_history)
   curr_size = jnp.where(state.k < his_size, state.k, his_size)
   q = -jnp.conj(state.g_k)
@@ -205,8 +207,8 @@ def _two_loop_recursion(state: LBFGSResults):
   def body_fun1(j, carry):
     i = his_size - 1 - j
     _q, _a_his = carry
-    a_i = state.rho_history[i] * jnp.real(_dot(jnp.conj(state.s_history[i]), _q))
-    _a_his = ops.index_update(_a_his, ops.index[i], a_i)
+    a_i = state.rho_history[i] * _dot(jnp.conj(state.s_history[i]), _q).real.astype(dtype)
+    _a_his = _a_his.at[i].set(a_i)
     _q = _q - a_i * jnp.conj(state.y_history[i])
     return _q, _a_his
 
@@ -215,7 +217,7 @@ def _two_loop_recursion(state: LBFGSResults):
 
   def body_fun2(j, _q):
     i = his_size - curr_size + j
-    b_i = state.rho_history[i] * jnp.real(_dot(state.y_history[i], _q))
+    b_i = state.rho_history[i] * _dot(state.y_history[i], _q).real.astype(dtype)
     _q = _q + (a_his[i] - b_i) * state.s_history[i]
     return _q
 
@@ -225,9 +227,9 @@ def _two_loop_recursion(state: LBFGSResults):
 
 def _update_history_vectors(history, new):
   # TODO(Jakob-Unfried) use rolling buffer instead? See #6053
-  return ops.index_update(jnp.roll(history, -1, axis=0), ops.index[-1, :], new)
+  return jnp.roll(history, -1, axis=0).at[-1, :].set(new)
 
 
 def _update_history_scalars(history, new):
   # TODO(Jakob-Unfried) use rolling buffer instead? See #6053
-  return ops.index_update(jnp.roll(history, -1, axis=0), ops.index[-1], new)
+  return jnp.roll(history, -1, axis=0).at[-1].set(new)

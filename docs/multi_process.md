@@ -12,11 +12,11 @@ operations (e.g. {func}`jax.lax.psum`) in multi-process settings, although other
 communication methods may be useful too depending on your use case (e.g. RPC,
 [mpi4jax](https://github.com/mpi4jax/mpi4jax)). If you’re not already familiar
 with JAX’s collective operations, we recommend starting with the
-{doc}`/jax-101/06-parallelism` notebook. An important feature of multi-process
-environments is direct communication links between accelerators, e.g. the
+{doc}`/jax-101/06-parallelism` notebook. An important requirement of multi-process
+environments in JAX is direct communication links between accelerators, e.g. the
 high-speed interconnects for Cloud TPUs or
 [NCCL](https://developer.nvidia.com/nccl) for GPUs. These links are what allow
-collective operations to run across multiple process’ worth of accelerators.
+collective operations to run across multiple processes’ worth of accelerators.
 
 
 ## Multi-process programming model
@@ -80,7 +80,7 @@ out the {doc}`/jax-101/06-parallelism` notebook.) Each process should call the
 same pmapped function and pass in arguments to be mapped across its _local_
 devices (i.e., the pmapped axis size is equal to the number of local
 devices). Similarly, the function will return outputs sharded across _local_
-devices only. Inside the function however, collective communication operations
+devices only. Inside the function, however, collective communication operations
 are run across all _global_ devices, across all processes. Conceptually, this
 can be thought of as running a pmap over a single array sharded across hosts,
 where each host “sees” only its local shard of the input and output.

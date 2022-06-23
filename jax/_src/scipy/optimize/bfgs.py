@@ -18,7 +18,7 @@ from typing import Callable, NamedTuple, Optional, Union
 import jax
 import jax.numpy as jnp
 from jax import lax
-from .line_search import line_search
+from jax._src.scipy.optimize.line_search import line_search
 
 
 class _BFGSResults(NamedTuple):
@@ -96,7 +96,7 @@ def minimize_bfgs(
 
   d = x0.shape[0]
 
-  initial_H = jnp.eye(d)
+  initial_H = jnp.eye(d, dtype=x0.dtype)
   f_0, g_0 = jax.value_and_grad(fun)(x0)
   state = _BFGSResults(
       converged=jnp.linalg.norm(g_0, ord=norm) < gtol,

@@ -20,14 +20,16 @@ import jax
 from jax import lax, numpy as jnp
 from jax import config
 from jax.experimental import host_callback as hcb
-from jax.lib import xla_client
-import jax.test_util as jtu
+from jax._src.lib import xla_client
+import jax._src.test_util as jtu
 import numpy as np
 
 config.parse_flags_with_absl()
 
+
 class InfeedTest(jtu.JaxTestCase):
 
+  @jax.numpy_rank_promotion("allow")  # Test explicitly exercises implicit rank promotion.
   def testInfeed(self):
 
     @jax.jit
@@ -40,8 +42,8 @@ class InfeedTest(jtu.JaxTestCase):
       return x + y + z
 
     x = np.float32(1.5)
-    y = np.reshape(np.arange(12, dtype=np.float32), (3, 4)) # np.random.randn(3, 4).astype(np.float32)
-    z = np.random.randn(3, 1, 1).astype(np.float32)
+    y = np.reshape(np.arange(12, dtype=np.float32), (3, 4)) # self.rng().randn(3, 4).astype(np.float32)
+    z = self.rng().randn(3, 1, 1).astype(np.float32)
     device = jax.local_devices()[0]
     device.transfer_to_infeed((y,))
     device.transfer_to_infeed((z,))
@@ -66,6 +68,7 @@ class InfeedTest(jtu.JaxTestCase):
     device.transfer_to_infeed(tuple(flat_to_infeed))
     self.assertAllClose(f(x), to_infeed)
 
+  @jax.numpy_rank_promotion("allow")  # Test explicitly exercises implicit rank promotion.
   def testInfeedThenOutfeed(self):
     hcb.stop_outfeed_receiver()
 
@@ -78,7 +81,7 @@ class InfeedTest(jtu.JaxTestCase):
       return x - 1
 
     x = np.float32(7.5)
-    y = np.random.randn(3, 4).astype(np.float32)
+    y = self.rng().randn(3, 4).astype(np.float32)
     execution = threading.Thread(target=lambda: f(x))
     execution.start()
     device = jax.local_devices()[0]
@@ -107,7 +110,7 @@ class InfeedTest(jtu.JaxTestCase):
     execution = threading.Thread(target=lambda: f(n))
     execution.start()
     for _ in range(n):
-      x = np.random.randn(3, 4).astype(np.float32)
+      x = self.rng().randn(3, 4).astype(np.float32)
       device.transfer_to_infeed((x,))
       y, = device.transfer_from_outfeed(xla_client.shape_from_pyval((x,))
                                         .with_major_to_minor_layout_if_absent())

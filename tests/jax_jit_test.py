@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from functools import partial
 import inspect
 
 from absl.testing import absltest
@@ -19,9 +20,9 @@ from absl.testing import parameterized
 import jax
 from jax._src import api
 from jax import dtypes
-from jax import lib as jaxlib
+from jax._src import lib as jaxlib
 from jax import numpy as jnp
-from jax import test_util as jtu
+from jax._src import test_util as jtu
 from jax.config import config
 import numpy as np
 
@@ -39,7 +40,7 @@ def _cpp_device_put(value, device):
   return jaxlib.jax_jit.device_put(value, config.x64_enabled, device)
 
 
-class JaxJitTest(parameterized.TestCase):
+class JaxJitTest(jtu.JaxTestCase):
 
   def test_is_float_0(self):
     self.assertTrue(
@@ -56,8 +57,9 @@ class JaxJitTest(parameterized.TestCase):
       output_buffer = device_put_function(value, device=device)
 
       self.assertFalse(output_buffer.aval.weak_type)
+      dtype = dtypes.canonicalize_dtype(dtype)
       self.assertEqual(output_buffer.aval, jax.core.ShapedArray((), dtype))
-      self.assertEqual(output_buffer.dtype, dtypes.canonicalize_dtype(dtype))
+      self.assertEqual(output_buffer.dtype, dtype)
 
   @parameterized.parameters([jax.device_put, _cpp_device_put])
   def test_device_put_on_numpy_arrays(self, device_put_function):
@@ -68,8 +70,9 @@ class JaxJitTest(parameterized.TestCase):
       output_buffer = device_put_function(value, device=device)
 
       self.assertFalse(output_buffer.aval.weak_type)
+      dtype = dtypes.canonicalize_dtype(dtype)
       self.assertEqual(output_buffer.aval, jax.core.ShapedArray((3, 4), dtype))
-      self.assertEqual(output_buffer.dtype, dtypes.canonicalize_dtype(dtype))
+      self.assertEqual(output_buffer.dtype, dtype)
       np.testing.assert_array_equal(output_buffer, np.zeros((3, 4),
                                                             dtype=dtype))
 
@@ -197,10 +200,11 @@ class JaxJitTest(parameterized.TestCase):
     self.assertTrue(signature.weak_type)
 
   def test_signature_support(self):
+    jit = partial(api._jit, True)
     def f(a, b, c):
       return a + b + c
 
-    jitted_f = api._cpp_jit(f)
+    jitted_f = jit(f)
     self.assertEqual(inspect.signature(f), inspect.signature(jitted_f))
 
 

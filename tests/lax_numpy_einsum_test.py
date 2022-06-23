@@ -24,7 +24,7 @@ from absl.testing import parameterized
 import jax
 from jax import lax
 import jax.numpy as jnp
-import jax.test_util as jtu
+import jax._src.test_util as jtu
 
 from jax.config import config
 config.parse_flags_with_absl()
@@ -219,7 +219,7 @@ class EinsumTest(jtu.JaxTestCase):
 
   # these tests are based on https://github.com/dask/dask/pull/3412/files
   @parameterized.named_parameters(
-      {"testcase_name": "_{}_dtype={}".format(einstr, dtype.__name__),
+      {"testcase_name": f"_{einstr}_dtype={dtype.__name__}",
       "einstr": einstr, "dtype": dtype}
       for einstr in [
           'abc,bad->abcd',
@@ -293,7 +293,7 @@ class EinsumTest(jtu.JaxTestCase):
 
   def test_einsum_kpmurphy_example(self):
     # code from an email with @murphyk
-    N = 2; C = 3; D = 4; K = 5; T = 6;
+    N, C, D, K, T = 2, 3, 4, 5, 6
     r = self.rng()
     S = r.randn(N, T, K)
     W = r.randn(K, D)

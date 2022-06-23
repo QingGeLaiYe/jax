@@ -12,10 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# flake8: noqa: F401
-
 from jax._src.scipy.stats.poisson import (
-  logpmf,
-  pmf,
-  cdf
+  logpmf as logpmf,
+  pmf as pmf,
+  cdf as cdf,
 )

@@ -14,33 +14,42 @@
 
 
 import functools
+from functools import partial
 import itertools as it
+from collections import namedtuple
 import operator
 import types
-from typing import Any, Callable
+import threading
+from typing import (Any, Callable, Dict, Iterable, List, Tuple, Generic,
+                    TypeVar, Set, Iterator, Sequence)
+import weakref
 
 from absl import logging
 import numpy as np
 
 from jax.config import config
 
-partial = functools.partial
+Seq = Sequence
 
+T = TypeVar("T")
 
 def safe_zip(*args):
   n = len(args[0])
   for arg in args[1:]:
-    assert len(arg) == n, 'length mismatch: {}'.format(list(map(len, args)))
+    assert len(arg) == n, f'length mismatch: {list(map(len, args))}'
   return list(zip(*args))
 
 def safe_map(f, *args):
   args = list(map(list, args))
   n = len(args[0])
   for arg in args[1:]:
-    assert len(arg) == n, 'length mismatch: {}'.format(list(map(len, args)))
+    assert len(arg) == n, f'length mismatch: {list(map(len, args))}'
   return list(map(f, *args))
 
 def unzip2(xys):
+  """Unzip sequence of length-2 tuples into two tuples."""
+  # Note: we deliberately don't use zip(*xys) because it is lazily evaluated,
+  # is too permissive about inputs, and does not guarantee a length-2 output.
   xs = []
   ys = []
   for x, y in xys:
@@ -49,6 +58,9 @@ def unzip2(xys):
   return tuple(xs), tuple(ys)
 
 def unzip3(xyzs):
+  """Unzip sequence of length-3 tuples into three tuples."""
+  # Note: we deliberately don't use zip(*xyzs) because it is lazily evaluated,
+  # is too permissive about inputs, and does not guarantee a length-3 output.
   xs = []
   ys = []
   zs = []
@@ -64,8 +76,7 @@ def subvals(lst, replace):
     lst[i] = v
   return tuple(lst)
 
-def split_list(args, ns):
-  assert type(ns) is list
+def split_list(args: Sequence[T], ns: Sequence[int]) -> List[List[T]]:
   args = list(args)
   lists = []
   for n in ns:
@@ -74,22 +85,44 @@ def split_list(args, ns):
   lists.append(args)
   return lists
 
+def partition_list(bs: Sequence[bool], l: Sequence[T]) -> Tuple[List[T], List[T]]:
+  assert len(bs) == len(l)
+  lists = [], []  # type: ignore
+  for b, x in zip(bs, l):
+    lists[b].append(x)
+  return lists
+
+def merge_lists(bs: Sequence[bool], l0: Sequence[T], l1: Sequence[T]) -> List[T]:
+  assert sum(bs) == len(l1) and len(bs) - sum(bs) == len(l0)
+  i0, i1 = iter(l0), iter(l1)
+  out = [next(i1) if b else next(i0) for b in bs]
+  sentinel = object()
+  assert next(i0, sentinel) is next(i1, sentinel) is sentinel
+  return out
+
 def split_dict(dct, names):
   dct = dict(dct)
   lst = [dct.pop(name) for name in names]
   assert not dct
   return lst
 
-def concatenate(xs):
+def concatenate(xs: Iterable[Sequence[T]]) -> List[T]:
+  """Concatenates/flattens a list of lists."""
   return list(it.chain.from_iterable(xs))
 
-class partialmethod(functools.partial):
-  def __get__(self, instance, owner):
-    if instance is None:
-      return self
-    else:
-      return partial(self.func, instance,
-                     *(self.args or ()), **(self.keywords or {}))
+flatten = concatenate
+
+_unflatten_done = object()
+
+def unflatten(xs: Iterable[T], ns: Sequence[int]) -> List[List[T]]:
+  """Splits `xs` into subsequences of lengths `ns`.
+
+  Unlike `split_list`, the `sum(ns)` must be equal to `len(xs)`."""
+  xs_iter = iter(xs)
+  unflattened = [[next(xs_iter) for _ in range(n)] for n in ns]
+  assert next(xs_iter, _unflatten_done) is _unflatten_done
+  return unflattened
+
 
 def curry(f):
   """Curries arguments of f, returning a function on any remaining arguments.
@@ -190,18 +223,86 @@ def cache(max_size=4096):
     return wrapper
   return wrap
 
-def memoize(f):
-  @functools.lru_cache(None)
-  def memoized(_, *args, **kwargs):
-    return f(*args, **kwargs)
+memoize = cache(max_size=None)
 
-  @functools.wraps(f)
-  def wrapper(*args, **kwargs):
-    return memoized(config._trace_context(), *args, **kwargs)
+CacheInfo = namedtuple("CacheInfo", ["hits", "misses", "maxsize", "currsize"])
 
-  wrapper.cache_clear = memoized.cache_clear
-  wrapper.cache_info = memoized.cache_info
-  return wrapper
+def weakref_lru_cache(call: Callable, maxsize=2048):
+  """
+  Least recently used cache decorator with weakref support.
+
+  The cache will take a weakref to the first argument of the wrapped function
+  and strong refs to all subsequent operations. In all other respects it should
+  behave similar to `functools.lru_cache`.
+  """
+  cache: Dict[Any, Any] = {}
+  hits = misses = 0
+  lock = threading.Lock()
+
+  def remove_key(tctx, args, kwargs, weak_arg):
+    k = (weak_arg, tctx, args, kwargs)
+    try:
+      # This has a chance to race with the iteration in next(iter(cache)),
+      # but we cannot lock because GC can get triggered synchronously inside
+      # a critical section and will not relinquish control until the callback
+      # has finished. This would lead to a deadlock between this weakref
+      # cleanup function and any function below which locks.
+      del cache[k]
+    except KeyError:
+      pass
+
+  def wrapped(weak_arg, *args, **kwargs):
+    nonlocal hits, misses
+    if config.jax_check_tracer_leaks:
+      return call(weak_arg, *args, **kwargs)
+    kwargs_key = tuple(kwargs.items())
+    tctx = config._trace_context()
+    k = (weakref.ref(weak_arg,
+         functools.partial(remove_key, tctx, args, kwargs_key)),
+         tctx, args, kwargs_key)
+    with lock:
+      if k in cache:
+        hits += 1
+        result = cache[k]
+        # del and reinsert to bump key in the insertion order.
+        del cache[k]
+        cache[k] = result
+        return result
+      misses += 1
+    result = call(weak_arg, *args, **kwargs)
+    with lock:
+      cache[k] = result
+      num_errors = 0
+      while len(cache) > maxsize:
+        try:
+          del_k = next(iter(cache))
+          # This happens if a weakref callback happens between iter and
+          # next. Just ignore the error. WeakKeyDictionary handles this
+          # by deferring the deletes, but that has a chance at leaking,
+          # and this solution is easier.
+        except RuntimeError:
+          num_errors += 1
+          if num_errors > len(cache):
+            # This must be some other problem.
+            raise
+          else:
+            continue
+        del cache[del_k]
+      return result
+
+  def cache_info():
+    with lock:
+      return CacheInfo(hits, misses, maxsize, len(cache))
+
+  def cache_clear():
+    nonlocal hits, misses
+    with lock:
+      hits = misses = 0
+      cache.clear()
+
+  wrapped.cache_info = cache_info
+  wrapped.cache_clear = cache_clear
+  return wrapped
 
 def prod(xs):
   out = 1
@@ -209,17 +310,14 @@ def prod(xs):
     out *= x
   return out
 
-class WrapHashably:
+class Unhashable:
   __slots__ = ["val"]
 
   def __init__(self, val):
     self.val = val
 
-  def __hash__(self):
-    return id(self.val)
-
   def __eq__(self, other):
-    return self.val is other.val
+    return self.val == other.val
 
 class Hashable:
   __slots__ = ["val"]
@@ -267,16 +365,28 @@ def get_module_functions(module):
 def wrap_name(name, transform_name):
   return transform_name + '(' + name + ')'
 
-def extend_name_stack(stack, name=''):
+def new_name_stack(name: str = ''):
+  if config.jax_experimental_name_stack:
+    from jax._src import source_info_util
+    name_stack = source_info_util.NameStack()
+    if name:
+      name_stack = name_stack.extend(name)
+    return name_stack
+  return name + '/'
+
+def extend_name_stack(stack, name: str):
+  if config.jax_experimental_name_stack:
+    from jax._src import source_info_util
+    assert isinstance(stack, source_info_util.NameStack), stack
+    return stack.extend(name)
+  assert isinstance(stack, str)
   return stack + name + '/'
 
 def canonicalize_axis(axis, num_dims) -> int:
   """Canonicalize an axis in [-num_dims, num_dims) to [0, num_dims)."""
   axis = operator.index(axis)
   if not -num_dims <= axis < num_dims:
-    raise ValueError(
-        "axis {} is out of bounds for array of dimension {}".format(
-            axis, num_dims))
+    raise ValueError(f"axis {axis} is out of bounds for array of dimension {num_dims}")
   if axis < 0:
     axis = axis + num_dims
   return axis
@@ -336,7 +446,7 @@ def taggedtuple(name, fields) -> Callable[..., Any]:
   def __new__(cls, *xs):
     return tuple.__new__(cls, (cls,) + xs)
   def __repr__(self):
-    return '{}{}'.format(name, tuple.__str__(self[1:]))
+    return f'{name}{tuple.__str__(self[1:])}'
   class_namespace = {'__new__' : __new__, '__repr__': __repr__}
   for i, f in enumerate(fields):
     class_namespace[f] = property(operator.itemgetter(i+1))  # type: ignore
@@ -408,3 +518,30 @@ def distributed_debug_log(*pairs):
       lines.append(f"{e}")
     lines.append("DISTRIBUTED_DEBUG_END")
     logging.warning("\n".join(lines))
+
+
+class OrderedSet(Generic[T]):
+  elts_set: Set[T]
+  elts_list: List[T]
+
+  def __init__(self):
+    self.elts_set = set()
+    self.elts_list = []
+
+  def add(self, elt: T) -> None:
+    if elt not in self.elts_set:
+      self.elts_set.add(elt)
+      self.elts_list.append(elt)
+
+  def update(self, elts: Seq[T]) -> None:
+    for e in elts:
+      self.add(e)
+
+  def __iter__(self) -> Iterator[T]:
+    return iter(self.elts_list)
+
+  def __len__(self) -> int:
+    return len(self.elts_list)
+
+  def __contains__(self, elt: T) -> bool:
+    return elt in self.elts_set

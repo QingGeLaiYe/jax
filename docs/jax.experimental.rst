@@ -1,20 +1,36 @@
+.. currentmodule:: jax.experimental
+
 jax.experimental package
 ========================
 
 ``jax.experimental.optix`` has been moved into its own Python package
-(``optax``).
+(https://github.com/deepmind/optax).
+
+``jax.experimental.ann`` has been moved into ``jax.lax``.
+
+Experimental Modules
+--------------------
 
 .. toctree::
     :maxdepth: 1
 
+    jax.experimental.global_device_array
     jax.experimental.host_callback
     jax.experimental.loops
     jax.experimental.maps
     jax.experimental.pjit
-    jax.experimental.optimizers
-    jax.experimental.stax
+    jax.experimental.sparse
+    jax.experimental.jet
 
-.. automodule:: jax.experimental
+Experimental APIs
+-----------------
 
-.. autofunction:: enable_x64
-.. autofunction:: disable_x64
+.. autosummary::
+   :toctree: _autosummary
+
+   enable_x64
+   disable_x64
+
+   jax.experimental.checkify.checkify
+   jax.experimental.checkify.check
+   jax.experimental.checkify.check_error

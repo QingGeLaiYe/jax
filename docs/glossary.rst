@@ -13,7 +13,7 @@ JAX Glossary of Terms
       by JAX to perform computations.
 
     DeviceArray
-      JAX's analog of the :class:`numpy.ndarray`. See :class:`jax.interpreters.xla.DeviceArray`.
+      JAX's analog of the :class:`numpy.ndarray`. See :class:`jaxlib.xla_extension.DeviceArray`.
 
     forward-mode autodiff
       See :term:`JVP`
@@ -83,3 +83,7 @@ JAX Glossary of Terms
       Short for *Accelerated Linear Algebra*, XLA is a domain-specific compiler for linear
       algebra operations that is the primary backend for :term:`JIT`-compiled JAX code.
       See https://www.tensorflow.org/xla/.
+
+    weak type
+      A JAX data type that has the same type promotion semantics as Python scalars;
+      see :ref:`weak-types`.

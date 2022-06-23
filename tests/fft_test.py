@@ -23,10 +23,18 @@ from absl.testing import parameterized
 import jax
 from jax import lax
 from jax import numpy as jnp
-from jax import test_util as jtu
+from jax._src import dtypes
+from jax._src import test_util as jtu
+from jax._src.numpy.util import _promote_dtypes_complex
 
 from jax.config import config
 config.parse_flags_with_absl()
+
+numpy_version = tuple(map(int, np.__version__.split('.')[:3]))
+if numpy_version < (1, 20):
+  FFT_NORMS = [None, "ortho"]
+else:
+  FFT_NORMS = [None, "ortho", "forward", "backward"]
 
 
 float_dtypes = jtu.dtypes.floating
@@ -64,8 +72,8 @@ def _irfft_with_zeroed_inputs(irfft_fun):
   # irfft isn't defined on the full domain of inputs, so in order to have a
   # well defined derivative on the whole domain of the function, we zero-out
   # the imaginary part of the first and possibly the last elements.
-  def wrapper(z, axes, s=None):
-    return irfft_fun(_zero_for_irfft(z, axes), axes=axes, s=s)
+  def wrapper(z, axes, s=None, norm=None):
+    return irfft_fun(_zero_for_irfft(z, axes), axes=axes, s=s, norm=norm)
   return wrapper
 
 
@@ -95,23 +103,40 @@ class FftTest(jtu.JaxTestCase):
       with self.assertRaises(NotImplementedError):
         func()
 
+  def testLaxFftAcceptsStringTypes(self):
+    rng = jtu.rand_default(self.rng())
+    x = rng((10,), np.complex64)
+    self.assertAllClose(np.fft.fft(x).astype(np.complex64),
+                        lax.fft(x, "FFT", fft_lengths=(10,)))
+
+  @parameterized.parameters((np.float32,), (np.float64,))
+  def testLaxIrfftDoesNotMutateInputs(self, dtype):
+    if dtype == np.float64 and not config.x64_enabled:
+      raise self.skipTest("float64 requires jax_enable_x64=true")
+    x = (1 + 1j) * jnp.array([[1.0, 2.0], [3.0, 4.0]], dtype=dtypes._to_complex_dtype(dtype))
+    y = np.asarray(jnp.fft.irfft2(x))
+    z = np.asarray(jnp.fft.irfft2(x))
+    self.assertAllClose(y, z)
+
   @parameterized.named_parameters(jtu.cases_from_list(
-      {"testcase_name": "_inverse={}_real={}_shape={}_axes={}_s={}".format(
-          inverse, real, jtu.format_shape_dtype_string(shape, dtype), axes, s),
-       "axes": axes, "shape": shape, "dtype": dtype, "inverse": inverse, "real": real, "s": s}
+      {"testcase_name": "_inverse={}_real={}_shape={}_axes={}_s={}_norm={}".format(
+          inverse, real, jtu.format_shape_dtype_string(shape, dtype), axes, s, norm),
+       "axes": axes, "shape": shape, "dtype": dtype, "inverse": inverse, "real": real, "s": s, "norm":norm}
       for inverse in [False, True]
       for real in [False, True]
       for dtype in (real_dtypes if real and not inverse else all_dtypes)
       for shape in [(10,), (10, 10), (9,), (2, 3, 4), (2, 3, 4, 5)]
       for axes in _get_fftn_test_axes(shape)
-      for s in _get_fftn_test_s(shape, axes)))
-  def testFftn(self, inverse, real, shape, dtype, axes, s):
+      for s in _get_fftn_test_s(shape, axes)
+      for norm in FFT_NORMS
+      ))
+  def testFftn(self, inverse, real, shape, dtype, axes, s, norm):
     rng = jtu.rand_default(self.rng())
     args_maker = lambda: (rng(shape, dtype),)
     jnp_op = _get_fftn_func(jnp.fft, inverse, real)
     np_op = _get_fftn_func(np.fft, inverse, real)
-    jnp_fn = lambda a: jnp_op(a, axes=axes)
-    np_fn = lambda a: np_op(a, axes=axes) if axes is None or axes else a
+    jnp_fn = lambda a: jnp_op(a, axes=axes, norm=norm)
+    np_fn = lambda a: np_op(a, axes=axes, norm=norm) if axes is None or axes else a
     # Numpy promotes to complex128 aggressively.
     self._CheckAgainstNumpy(np_fn, jnp_fn, args_maker, check_dtypes=False,
                             tol=1e-4)
@@ -123,13 +148,20 @@ class FftTest(jtu.JaxTestCase):
       tol = 0.15
       jtu.check_grads(jnp_fn, args_maker(), order=2, atol=tol, rtol=tol)
 
+    # check dtypes
+    dtype = jnp_fn(rng(shape, dtype)).dtype
+    expected_dtype = jnp.promote_types(float if inverse and real else complex, dtype)
+    self.assertEqual(dtype, expected_dtype)
+
   def testIrfftTranspose(self):
     # regression test for https://github.com/google/jax/issues/6223
     def build_matrix(linear_func, size):
       return jax.vmap(linear_func)(jnp.eye(size, size))
 
     def func(x):
-      return jnp.fft.irfft(jnp.concatenate([jnp.zeros(1), x[:2] + 1j*x[2:]]))
+      x, = _promote_dtypes_complex(x)
+      return jnp.fft.irfft(jnp.concatenate([jnp.zeros_like(x, shape=1),
+                                            x[:2] + 1j*x[2:]]))
 
     def func_transpose(x):
       return jax.linear_transpose(func, x)(x)[0]
@@ -139,7 +171,7 @@ class FftTest(jtu.JaxTestCase):
     self.assertAllClose(matrix, matrix2)
 
   @parameterized.named_parameters(jtu.cases_from_list(
-      {"testcase_name": "_inverse={}_real={}".format(inverse, real),
+      {"testcase_name": f"_inverse={inverse}_real={real}",
        "inverse": inverse, "real": real}
       for inverse in [False, True]
       for real in [False, True]))
@@ -158,7 +190,7 @@ class FftTest(jtu.JaxTestCase):
         lambda: func(rng([2, 3, 4, 5], dtype=np.float64), axes=None))
     self.assertRaisesRegex(
         ValueError,
-        "jax.numpy.fft.{} does not support repeated axes. Got axes \\[1, 1\\].".format(name),
+        f"jax.numpy.fft.{name} does not support repeated axes. Got axes \\[1, 1\\].",
         lambda: func(rng([2, 3], dtype=np.float64), axes=[1, 1]))
     self.assertRaises(
         ValueError, lambda: func(rng([2, 3], dtype=np.float64), axes=[2]))
@@ -202,7 +234,7 @@ class FftTest(jtu.JaxTestCase):
     self._CompileAndCheck(jnp_op, args_maker)
 
   @parameterized.named_parameters(jtu.cases_from_list(
-      {"testcase_name": "_inverse={}_real={}_hermitian={}".format(inverse, real, hermitian),
+      {"testcase_name": f"_inverse={inverse}_real={real}_hermitian={hermitian}",
        "inverse": inverse, "real": real, "hermitian": hermitian}
       for inverse in [False, True]
       for real in [False, True]
@@ -220,16 +252,14 @@ class FftTest(jtu.JaxTestCase):
 
     self.assertRaisesRegex(
       ValueError,
-      "jax.numpy.fft.{} does not support multiple axes. "
-      "Please use jax.numpy.fft.{}n. "
-      "Got axis = \\[1, 1\\].".format(name, name),
+      f"jax.numpy.fft.{name} does not support multiple axes. "
+      f"Please use jax.numpy.fft.{name}n. Got axis = \\[1, 1\\].",
       lambda: func(rng([2, 3], dtype=np.float64), axis=[1, 1])
     )
     self.assertRaisesRegex(
       ValueError,
-      "jax.numpy.fft.{} does not support multiple axes. "
-      "Please use jax.numpy.fft.{}n. "
-      "Got axis = \\(1, 1\\).".format(name, name),
+      f"jax.numpy.fft.{name} does not support multiple axes. "
+      f"Please use jax.numpy.fft.{name}n. Got axis = \\(1, 1\\).",
       lambda: func(rng([2, 3], dtype=np.float64), axis=(1, 1))
     )
     self.assertRaises(
@@ -238,15 +268,17 @@ class FftTest(jtu.JaxTestCase):
         ValueError, lambda: func(rng([2, 3], dtype=np.float64), axis=[-3]))
 
   @parameterized.named_parameters(jtu.cases_from_list(
-      {"testcase_name": "_inverse={}_real={}_shape={}_axes={}".format(
-          inverse, real, jtu.format_shape_dtype_string(shape, dtype), axes),
-       "axes": axes, "shape": shape, "dtype": dtype, "inverse": inverse, "real": real}
+      {"testcase_name": "_inverse={}_real={}_shape={}_axes={}_norm={}".format(
+          inverse, real, jtu.format_shape_dtype_string(shape, dtype), axes, norm),
+       "axes": axes, "shape": shape, "dtype": dtype, "inverse": inverse, "real": real, "norm":norm}
       for inverse in [False, True]
       for real in [False, True]
       for dtype in (real_dtypes if real and not inverse else all_dtypes)
       for shape in [(16, 8, 4, 8), (16, 8, 4, 8, 4)]
-      for axes in [(-2, -1), (0, 1), (1, 3), (-1, 2)]))
-  def testFft2(self, inverse, real, shape, dtype, axes):
+      for axes in [(-2, -1), (0, 1), (1, 3), (-1, 2)]
+      for norm in FFT_NORMS
+      ))
+  def testFft2(self, inverse, real, shape, dtype, axes, norm):
     rng = jtu.rand_default(self.rng())
     args_maker = lambda: (rng(shape, dtype),)
     name = 'fft2'
@@ -256,13 +288,15 @@ class FftTest(jtu.JaxTestCase):
       name = 'i' + name
     jnp_op = getattr(jnp.fft, name)
     np_op = getattr(np.fft, name)
+    jnp_fn = lambda a: jnp_op(a, axes=axes, norm=norm)
+    np_fn = lambda a: np_op(a, axes=axes, norm=norm) if axes is None or axes else a
     # Numpy promotes to complex128 aggressively.
-    self._CheckAgainstNumpy(np_op, jnp_op, args_maker, check_dtypes=False,
+    self._CheckAgainstNumpy(np_fn, jnp_fn, args_maker, check_dtypes=False,
                             tol=1e-4)
     self._CompileAndCheck(jnp_op, args_maker)
 
   @parameterized.named_parameters(jtu.cases_from_list(
-      {"testcase_name": "_inverse={}_real={}".format(inverse, real),
+      {"testcase_name": f"_inverse={inverse}_real={real}",
        "inverse": inverse, "real": real}
       for inverse in [False, True]
       for real in [False, True]))
@@ -316,7 +350,7 @@ class FftTest(jtu.JaxTestCase):
       jtu.check_grads(jnp_fn, args_maker(), order=2, atol=tol, rtol=tol)
 
   @parameterized.named_parameters(jtu.cases_from_list(
-    {"testcase_name": "_n={}".format(n),
+    {"testcase_name": f"_n={n}",
      "n": n}
     for n in [[0,1,2]]))
   def testFftfreqErrors(self, n):
@@ -359,7 +393,7 @@ class FftTest(jtu.JaxTestCase):
       jtu.check_grads(jnp_fn, args_maker(), order=2, atol=tol, rtol=tol)
 
   @parameterized.named_parameters(jtu.cases_from_list(
-    {"testcase_name": "_n={}".format(n),
+    {"testcase_name": f"_n={n}",
      "n": n}
     for n in [[0, 1, 2]]))
   def testRfftfreqErrors(self, n):

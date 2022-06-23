@@ -12,10 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import os
 from functools import partial
 from unittest import SkipTest
@@ -27,7 +23,7 @@ from absl.testing import parameterized
 import jax
 from jax import jit, pmap, vjp
 from jax import lax
-from jax import test_util as jtu
+from jax._src import test_util as jtu
 from jax import tree_util
 from jax.experimental import (sharded_jit, with_sharding_constraint,
                               PartitionSpec as P)
@@ -42,9 +38,7 @@ config.parse_flags_with_absl()
 class ShardedJitTest(jtu.JaxTestCase):
 
   def setUp(self):
-    super(ShardedJitTest, self).setUp()
-    if jtu.device_under_test() not in ["tpu", "gpu"]:
-      raise SkipTest
+    super().setUp()
     if jtu.device_under_test() == "gpu":
       os.environ["NCCL_LAUNCH_MODE"] = "PARALLEL"
 
@@ -242,7 +236,7 @@ class ShardedJitTest(jtu.JaxTestCase):
     def f(x):
       token = lax.create_token(x)
       (y, z), token = lax.infeed(token, infeed_shapes, partitions=infeed_parts)
-      return x @ y.T + z
+      return x @ y.T + z[jnp.newaxis]
 
     x = np.arange(prod(shape), dtype=np.float32).reshape(shape)
     y = x + 1
@@ -259,7 +253,7 @@ class ShardedJitTest(jtu.JaxTestCase):
     # waiting for the infeed data.
     result = f(x)
 
-    expected = x @ y.T + z
+    expected = x @ y.T + z[jnp.newaxis]
     self.assertAllClose(result, expected, check_dtypes=False)
 
   def testCompilationCache(self):
@@ -277,11 +271,6 @@ class ShardedJitTest(jtu.JaxTestCase):
 
 # TODO(skye): add more error tests
 class ShardedJitErrorsTest(jtu.JaxTestCase):
-
-  def setUp(self):
-    super(ShardedJitErrorsTest, self).setUp()
-    if jtu.device_under_test() not in ["tpu", "gpu"]:
-      raise SkipTest
 
   def testNotEnoughDevices(self):
     ndevices = jax.local_device_count()
@@ -326,12 +315,11 @@ class ShardedJitTestNoTpu(jtu.JaxTestCase):
     # Annotation from sharded_jit
     self.assertIn("sharding={replicated}", hlo.as_hlo_text())
 
+
 class PmapOfShardedJitTest(jtu.JaxTestCase):
 
   def setUp(self):
-    super(PmapOfShardedJitTest, self).setUp()
-    if jtu.device_under_test() not in ["tpu", "gpu"]:
-      raise SkipTest
+    super().setUp()
     if jtu.device_under_test() == "gpu":
       os.environ["NCCL_LAUNCH_MODE"] = "PARALLEL"
 
@@ -419,8 +407,8 @@ class PmapOfShardedJitTest(jtu.JaxTestCase):
 
     def f(x, y):
       a = lax.dot(x, y)
-      b = a + jnp.ones(a.shape)
-      c = b + jnp.ones(a.shape[0])
+      b = a + jnp.ones_like(a)
+      c = b + jnp.ones_like(a, shape=a.shape[0])[jnp.newaxis]
       return c
 
     self._runTest(f, in_partitions, out_partitions)

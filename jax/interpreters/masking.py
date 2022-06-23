@@ -22,12 +22,12 @@ from typing import Callable, Dict, Optional, Sequence, Union, Tuple
 
 import numpy as np
 
-from .. import core
-from .._src import dtypes
-from ..tree_util import tree_unflatten
-from ..core import ShapedArray, Trace, Tracer
-from .._src.util import safe_map, safe_zip, unzip2, prod, wrap_name
-from .. import linear_util as lu
+from jax import core
+from jax._src import dtypes
+from jax.tree_util import tree_unflatten
+from jax.core import ShapedArray, Trace, Tracer
+from jax._src.util import safe_map, safe_zip, unzip2, prod, wrap_name
+from jax import linear_util as lu
 
 map = safe_map
 zip = safe_zip
@@ -322,6 +322,7 @@ class DimensionHandlerPoly(core.DimensionHandler):
 
 
 core._SPECIAL_DIMENSION_HANDLERS[Poly] = DimensionHandlerPoly()
+dtypes.python_scalar_dtypes[Poly] = dtypes.python_scalar_dtypes[int]
 
 class Mon(dict):
   # TODO: move this before Poly in the file
@@ -429,7 +430,7 @@ def _parse_id(name): return Poly({Mon({name: 1}): 1})
 
 def _parse_lit(val_str): return int(val_str)
 
-class MonomorphicDim(object):
+class MonomorphicDim:
   def __str__(self): return '_'
 
 _monomorphic_dim = MonomorphicDim()
@@ -438,7 +439,7 @@ _monomorphic_dim = MonomorphicDim()
 #   1. '(m, n)'
 #   2. s_['m', 'n']
 
-class S_(object):
+class S_:
   def __getitem__(self, idx):
     return parse_spec(('(' + ','.join(map(str, idx)) + ')')
                              if type(idx) is tuple else str(idx))
@@ -458,7 +459,8 @@ class MaskTracer(Tracer):
 
   @property
   def aval(self):
-    return ShapedArray(self.polymorphic_shape, self.dtype)
+    return ShapedArray(self.polymorphic_shape,
+                       dtypes.canonicalize_dtype(self.dtype))
 
   @property
   def dtype(self):
@@ -490,7 +492,8 @@ class MaskTrace(Trace):
     if masking_rule is None:
       raise NotImplementedError(
         f'Masking rule for {primitive} not implemented yet.')
-    out_aval = primitive.abstract_eval(*(t.aval for t in tracers), **params)
+    # Ignore effects for now.
+    out_aval, _ = primitive.abstract_eval(*(t.aval for t in tracers), **params)
     vals, polymorphic_shapes = unzip2((t.val, t.polymorphic_shape) for t in tracers)
     logical_shapes = map(shape_as_value, polymorphic_shapes)
     # TODO(mattjj): generalize mask rule signature

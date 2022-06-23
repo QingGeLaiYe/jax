@@ -42,23 +42,23 @@ To build `jaxlib` from source, you must also install some prerequisites:
   are installed.
 
   See below for Windows build instructions.
-* Python packages: `numpy`, `scipy`, `six`, `wheel`.
-
-  The `six` package is required for during the jaxlib build only, and is not
-  required at install time.
+* Python packages: `numpy`, `wheel`.
 
 You can install the necessary Python dependencies using `pip`:
 
 ```
-pip install numpy scipy six wheel
+pip install numpy wheel
 ```
 
-To build `jaxlib` with CUDA support, you can run:
+To build `jaxlib` without CUDA GPU or TPU support (CPU only), you can run:
 
 ```
-python build/build.py --enable_cuda
+python build/build.py
 pip install dist/*.whl  # installs jaxlib (includes XLA)
 ```
+
+To build `jaxlib` with CUDA support, use `python build/build.py --enable_cuda`;
+to build with TPU support, use `python build/build.py --enable_tpu`.
 
 See `python build/build.py --help` for configuration options, including ways to
 specify the paths to CUDA and CUDNN, which you must have installed. Here
@@ -66,12 +66,27 @@ specify the paths to CUDA and CUDNN, which you must have installed. Here
 may need to use `python3` instead. By default, the wheel is written to the
 `dist/` subdirectory of the current directory.
 
-To build `jaxlib` without CUDA GPU support (CPU only), drop the `--enable_cuda`:
+### Building jaxlib from source with a modified TensorFlow repository.
 
-```
-python build/build.py
-pip install dist/*.whl  # installs jaxlib (includes XLA)
-```
+JAX depends on XLA, whose source code is in the
+[Tensorflow GitHub repository](https://github.com/tensorflow/tensorflow).
+By default JAX uses a pinned copy of the TensorFlow repository, but we often
+want to use a locally-modified copy of XLA when working on JAX. There are two
+ways to do this:
+
+* use Bazel's `override_repository` feature, which you can pass as a command
+  line flag to `build.py` as follows:
+
+  ```
+  python build/build.py --bazel_options=--override_repository=org_tensorflow=/path/to/tensorflow
+  ```
+* modify the `WORKSPACE` file in the root of the JAX source tree to point to
+  a different TensorFlow tree.
+
+To contribute changes back to XLA, send PRs to the TensorFlow repository.
+
+The version of XLA pinned by JAX is regularly updated, but is updated in
+particular before each `jaxlib` release.
 
 ### Additional Notes for Building `jaxlib` from source on Windows
 
@@ -81,19 +96,23 @@ If you need to build with CUDA enabled, follow the
 [CUDA Installation Guide](https://docs.nvidia.com/cuda/cuda-installation-guide-microsoft-windows/index.html)
 to set up a CUDA environment.
 
+JAX builds use symbolic links, which require that you activate
+[Developer Mode](https://docs.microsoft.com/en-us/windows/apps/get-started/enable-your-device-for-development).
+
 You can either install Python using its
 [Windows installer](https://www.python.org/downloads/), or if you prefer, you
 can use [Anaconda](https://docs.anaconda.com/anaconda/install/windows/)
 or [Miniconda](https://docs.conda.io/en/latest/miniconda.html#windows-installers)
-to setup a Python environment.
+to set up a Python environment.
 
 Some targets of Bazel use bash utilities to do scripting, so [MSYS2](https://www.msys2.org)
 is needed. See [Installing Bazel on Windows](https://docs.bazel.build/versions/master/install-windows.html#installing-compilers-and-language-runtimes)
 for more details. Install the following packages:
 
 ```
-pacman -S patch realpath
+pacman -S patch coreutils
 ```
+Once coreutils is installed, the realpath command should be present in your shell's path.
 
 Once everything is installed. Open PowerShell, and make sure MSYS2 is in the
 path of the current session. Ensure `bazel`, `patch` and `realpath` are
@@ -105,7 +124,6 @@ python .\build\build.py `
   --enable_cuda `
   --cuda_path='C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v10.1' `
   --cudnn_path='C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v10.1' `
-  --cuda_compute_capabilities='6.1' `
   --cuda_version='10.1' `
   --cudnn_version='7.6.5'
 ```
@@ -131,7 +149,7 @@ sets up symbolic links from site-packages into the repository.
 
 To run all the JAX tests, we recommend using `pytest-xdist`, which can run tests in
 parallel. First, install `pytest-xdist` and `pytest-benchmark` by running
-`ip install -r build/test-requirements.txt`.
+`pip install -r build/test-requirements.txt`.
 Then, from the repository root directory run:
 
 ```
@@ -174,7 +192,7 @@ python tests/lax_numpy_test.py --test_targets="testPad"
 
 The Colab notebooks are tested for errors as part of the documentation build.
 
-Note that to run the full pmap tests on a (multi-core) CPU only machine, you
+Note that to run the full pmap tests on a (multi-core) CPU-only machine, you
 can run:
 
 ```
@@ -184,14 +202,55 @@ pytest tests/pmap_tests.py
 I.e. don't use the `-n auto` option, since that effectively runs each test on a
 single-core worker.
 
+## Doctests
+JAX uses pytest in doctest mode to test the code examples within the documentation.
+You can run this using
+```
+pytest docs
+```
+Additionally, JAX runs pytest in `doctest-modules` mode to ensure code examples in
+function docstrings will run correctly. You can run this locally using, for example:
+```
+pytest --doctest-modules jax/_src/numpy/lax_numpy.py
+```
+Keep in mind that there are several files that are marked to be skipped when the
+doctest command is run on the full package; you can see the details in
+[`ci-build.yaml`](https://github.com/google/jax/blob/main/.github/workflows/ci-build.yaml)
+
 # Type checking
 
 We use `mypy` to check the type hints. To check types locally the same way
-as Travis checks them:
+as the CI checks them:
 
 ```
 pip install mypy
 mypy --config=mypy.ini --show-error-codes jax
+```
+
+Alternatively, you can use the [pre-commit](https://pre-commit.com/) framework to run this
+on all staged files in your git repository, automatically using the same mypy version as
+in the GitHub CI:
+
+```
+pre-commit run mypy
+```
+
+# Linting
+
+JAX uses the [flake8](https://flake8.pycqa.org/) linter to ensure code quality. You can check
+your local changes by running:
+
+```
+pip install flake8
+flake8 jax
+```
+
+Alternatively, you can use the [pre-commit](https://pre-commit.com/) framework to run this
+on all staged files in your git repository, automatically using the same flake8 version as
+the GitHub tests:
+
+```
+pre-commit run flake8
 ```
 
 # Update documentation
@@ -202,14 +261,17 @@ pip install -r docs/requirements.txt
 ```
 And then run:
 ```
-sphinx-build -b html docs docs/build/html
+sphinx-build -b html docs docs/build/html -j auto
 ```
 This can take a long time because it executes many of the notebooks in the documentation source;
 if you'd prefer to build the docs without executing the notebooks, you can run:
 ```
-sphinx-build -b html -D jupyter_execute_notebooks=off docs docs/build/html
+sphinx-build -b html -D nb_execution_mode=off docs docs/build/html -j auto
 ```
 You can then see the generated documentation in `docs/build/html/index.html`.
+
+The `-j auto` option controls the parallelism of the build. You can use a number
+in place of `auto` to control how many CPU cores to use.
 
 (update-notebooks)=
 
@@ -236,21 +298,25 @@ For making smaller changes to the text content of the notebooks, it is easiest t
 ### Syncing notebooks
 
 After editing either the ipynb or md versions of the notebooks, you can sync the two versions
-using [jupytext](https://jupytext.readthedocs.io/) by running:
+using [jupytext](https://jupytext.readthedocs.io/) by running `jupytext --sync` on the updated
+notebooks; for example:
 
 ```
-$ jupytext --sync docs/notebooks/*
+pip install jupytext==1.13.8
+jupytext --sync docs/notebooks/quickstart.ipynb
 ```
 
-Alternatively, you can run this command via the [pre-commit](https://pre-commit.com/)
-framework by executing the following in the main JAX directory:
+The jupytext version should match that specified in
+[.pre-commit-config.yaml](https://github.com/google/jax/blob/main/.pre-commit-config.yaml).
+
+To check that the markdown and ipynb files are properly synced, you may use the
+[pre-commit](https://pre-commit.com/) framework to perform the same check used
+by the github CI:
 
 ```
-$ pre-commit run --all
+git add docs -u  # pre-commit runs on files in git staging.
+pre-commit run jupytext
 ```
-
-See the pre-commit framework documentation for information on how to set your local git
-environment to execute this automatically.
 
 ### Creating new notebooks
 
@@ -258,7 +324,7 @@ If you are adding a new notebook to the documentation and would like to use the 
 command discussed here, you can set up your notebook for jupytext by using the following command:
 
 ```
-$ jupytext --set-formats ipynb,md:myst path/to/the/notebook.ipynb
+jupytext --set-formats ipynb,md:myst path/to/the/notebook.ipynb
 ```
 
 This works by adding a `"jupytext"` metadata field to the notebook file which specifies the
@@ -266,7 +332,7 @@ desired formats, and which the `jupytext --sync` command recognizes when invoked
 
 ### Notebooks within the sphinx build
 
-Some of the notebooks are built automatically as part of the Travis pre-submit checks and
+Some of the notebooks are built automatically as part of the pre-submit checks and
 as part of the [Read the docs](https://jax.readthedocs.io/en/latest) build.
 The build will fail if cells raise errors. If the errors are intentional, you can either catch them,
 or tag the cell with `raises-exceptions` metadata ([example PR](https://github.com/google/jax/pull/2402/files)).
@@ -278,7 +344,7 @@ See `exclude_patterns` in [conf.py](https://github.com/google/jax/blob/main/docs
 
 ## Documentation building on readthedocs.io
 
-JAX's auto-generated documentations is at <https://jax.readthedocs.io/>.
+JAX's auto-generated documentation is at <https://jax.readthedocs.io/>.
 
 The documentation building is controlled for the entire project by the
 [readthedocs JAX settings](https://readthedocs.org/dashboard/jax). The current settings

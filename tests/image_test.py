@@ -24,7 +24,7 @@ from absl.testing import parameterized
 import jax
 from jax import image
 from jax import numpy as jnp
-from jax import test_util as jtu
+from jax._src import test_util as jtu
 
 from jax.config import config
 
@@ -90,6 +90,7 @@ class ImageTest(jtu.JaxTestCase):
         "target_shape": target_shape,
         "method": method}
        for dtype in [np.float32]
+
        for target_shape, image_shape in itertools.combinations_with_replacement(
         [[3, 2], [6, 4], [33, 17], [50, 39]], 2)
        for method in ["nearest", "bilinear", "lanczos3", "bicubic"]))
@@ -177,6 +178,29 @@ class ImageTest(jtu.JaxTestCase):
     jax_fn = partial(image.resize, shape=target_shape, method=method,
                      antialias=antialias)
     jtu.check_grads(jax_fn, args_maker(), order=2, rtol=1e-2, eps=1.)
+
+  @parameterized.named_parameters(jtu.cases_from_list(
+       {"testcase_name": "_shape={}_target={}_method={}_antialias={}".format(
+          jtu.format_shape_dtype_string(image_shape, dtype),
+          jtu.format_shape_dtype_string(target_shape, dtype), method,
+          antialias),
+        "dtype": dtype, "image_shape": image_shape,
+        "target_shape": target_shape,
+        "method": method, "antialias": antialias}
+       for dtype in [np.float32]
+       for image_shape, target_shape in [
+         ([1], [0]),
+         ([5, 5], [5, 0]),
+         ([5, 5], [0, 1]),
+         ([5, 5], [0, 0])
+       ]
+       for method in ["nearest", "linear", "lanczos3", "lanczos5", "cubic"]
+       for antialias in [False, True]))
+  def testResizeEmpty(self, dtype, image_shape, target_shape, method, antialias):
+    # Regression test for https://github.com/google/jax/issues/7586
+    image = np.ones(image_shape, dtype)
+    out = jax.image.resize(image, shape=target_shape, method=method, antialias=antialias)
+    self.assertArraysEqual(out, jnp.zeros(target_shape, dtype))
 
   @parameterized.named_parameters(jtu.cases_from_list(
       {"testcase_name": "_shape={}_target={}_method={}".format(
@@ -292,7 +316,7 @@ class ImageTest(jtu.JaxTestCase):
 
 
   @parameterized.named_parameters(jtu.cases_from_list(
-      {"testcase_name": "antialias={}".format(antialias),
+      {"testcase_name": f"antialias={antialias}",
        "antialias": antialias}
       for antialias in [True, False]))
   def testScaleAndTranslateJITs(self, antialias):
@@ -325,7 +349,7 @@ class ImageTest(jtu.JaxTestCase):
     self.assertAllClose(output, expected, atol=2e-03)
 
   @parameterized.named_parameters(jtu.cases_from_list(
-      {"testcase_name": "antialias={}".format(antialias),
+      {"testcase_name": f"antialias={antialias}",
        "antialias": antialias}
       for antialias in [True, False]))
   def testScaleAndTranslateGradFinite(self, antialias):
@@ -358,6 +382,22 @@ class ImageTest(jtu.JaxTestCase):
     translate_out = jax.grad(translate_fn)(translation_a)
     self.assertTrue(jnp.all(jnp.isfinite(translate_out)))
 
+  def testScaleAndTranslateNegativeDims(self):
+    data = jnp.full((3, 3), 0.5)
+    actual = jax.image.scale_and_translate(
+      data, (5, 5), (-2, -1), jnp.ones(2), jnp.zeros(2), "linear")
+    expected = jax.image.scale_and_translate(
+      data, (5, 5), (0, 1), jnp.ones(2), jnp.zeros(2), "linear")
+    self.assertAllClose(actual, expected)
+
+  def testResizeWithUnusualShapes(self):
+    x = jnp.ones((3, 4))
+    # Array shapes are accepted
+    self.assertEqual((10, 17),
+                     jax.image.resize(x, jnp.array((10, 17)), "nearest").shape)
+    with self.assertRaises(TypeError):
+      # Fractional shapes are disallowed
+      jax.image.resize(x, [10.5, 17], "bicubic")
 
 
 if __name__ == "__main__":

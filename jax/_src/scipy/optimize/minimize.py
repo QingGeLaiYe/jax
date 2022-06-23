@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from typing import Any, Callable, Mapping, Optional, Tuple, Union
-from .bfgs import minimize_bfgs
-from ._lbfgs import _minimize_lbfgs
+from jax._src.scipy.optimize.bfgs import minimize_bfgs
+from jax._src.scipy.optimize._lbfgs import _minimize_lbfgs
 from typing import NamedTuple
 import jax.numpy as jnp
 
@@ -72,7 +72,7 @@ def minimize(
 
   Args:
     fun: the objective function to be minimized, ``fun(x, *args) -> float``,
-      where ``x`` is an 1-D array with shape ``(n,)`` and ``args`` is a tuple
+      where ``x`` is a 1-D array with shape ``(n,)`` and ``args`` is a tuple
       of the fixed parameters needed to completely specify the function.
       ``fun`` must support differentiation.
     x0: initial guess. Array of real elements of size ``(n,)``, where ``n`` is
@@ -125,4 +125,4 @@ def minimize(
                            njev=results.ngev,
                            nit=results.k)
 
-  raise ValueError("Method {} not recognized".format(method))
+  raise ValueError(f"Method {method} not recognized")

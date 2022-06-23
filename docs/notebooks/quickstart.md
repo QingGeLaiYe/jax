@@ -5,7 +5,7 @@ jupytext:
     extension: .md
     format_name: myst
     format_version: 0.13
-    jupytext_version: 1.10.0
+    jupytext_version: 1.13.8
 kernelspec:
   display_name: Python 3
   language: python
@@ -43,13 +43,6 @@ to leave Python.
 import jax.numpy as jnp
 from jax import grad, jit, vmap
 from jax import random
-```
-
-```{code-cell} ipython3
-:tags: [remove-cell]
-
-# Prevent GPU/TPU warning.
-import jax; jax.config.update('jax_platform_name', 'cpu')
 ```
 
 +++ {"id": "FQ89jHCYfhpg"}
@@ -117,17 +110,11 @@ The output of {func}`~jax.device_put` still acts like an NDArray, but it only co
 +++ {"id": "ghkfKNQttDpg"}
 
 If you have a GPU (or TPU!) these calls run on the accelerator and have the potential to be much faster than on CPU.
-
-```{code-cell} ipython3
-:id: RzXK8GnIs7VV
-
-x = np.random.normal(size=(size, size)).astype(np.float32)
-%timeit np.dot(x, x.T)
-```
+See {ref}`faq-jax-vs-numpy` for more comparison of performance characteristics of NumPy and JAX
 
 +++ {"id": "iOzp0P_GoJhb"}
 
-JAX is much more than just a GPU-backed NumPy. It also comes with a few program transformations that are useful when writing numerical code. For now, there's three main ones:
+JAX is much more than just a GPU-backed NumPy. It also comes with a few program transformations that are useful when writing numerical code. For now, there are three main ones:
 
  - {func}`~jax.jit`, for speeding up your code
  - {func}`~jax.grad`, for taking derivatives
@@ -141,7 +128,7 @@ Let's go over these, one-by-one. We'll also end up composing these in interestin
 
 +++ {"id": "YrqE32mvE3b7"}
 
-JAX runs transparently on the GPU (or CPU, if you don't have one, and TPU coming soon!). However, in the above example, JAX is dispatching kernels to the GPU one operation at a time. If we have a sequence of operations, we can use the `@jit` decorator to compile multiple operations together using [XLA](https://www.tensorflow.org/xla). Let's try that.
+JAX runs transparently on the GPU or TPU (falling back to CPU if you don't have one). However, in the above example, JAX is dispatching kernels to the GPU one operation at a time. If we have a sequence of operations, we can use the `@jit` decorator to compile multiple operations together using [XLA](https://www.tensorflow.org/xla). Let's try that.
 
 ```{code-cell} ipython3
 :id: qLGdCtFKFLOR

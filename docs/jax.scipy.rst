@@ -1,6 +1,17 @@
 jax.scipy package
 =================
 
+jax.scipy.fft
+-------------
+
+.. automodule:: jax.scipy.fft
+
+.. autosummary::
+  :toctree: _autosummary
+
+   dct
+   dctn
+
 jax.scipy.linalg
 ----------------
 
@@ -15,15 +26,23 @@ jax.scipy.linalg
    cholesky
    det
    eigh
+   eigh_tridiagonal
    expm
    expm_frechet
+   funm
    inv
    lu
    lu_factor
    lu_solve
+   polar
+   polar_unitary
    qr
+   rsf2csf
+   schur
+   sqrtm
    solve
    solve_triangular
+   sqrtm
    svd
    tril
    triu
@@ -61,6 +80,10 @@ jax.scipy.signal
    convolve2d
    correlate
    correlate2d
+   csd
+   istft
+   stft
+   welch
 
 jax.scipy.sparse.linalg
 -----------------------
@@ -88,7 +111,10 @@ jax.scipy.special
    erf
    erfc
    erfinv
+   exp1
+   expi
    expit
+   expn
    gammainc
    gammaincc
    gammaln
@@ -105,6 +131,7 @@ jax.scipy.special
    ndtr
    ndtri
    polygamma
+   sph_harm
    xlog1py
    xlogy
    zeta
@@ -190,6 +217,16 @@ jax.scipy.stats.gamma
 .. autosummary::
   :toctree: _autosummary
 
+   logpdf
+   pdf
+
+jax.scipy.stats.gennorm
+~~~~~~~~~~~~~~~~~~~~~~~
+.. automodule:: jax.scipy.stats.gennorm
+.. autosummary::
+  :toctree: _autosummary
+
+   cdf
    logpdf
    pdf
 

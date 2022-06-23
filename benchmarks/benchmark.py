@@ -75,8 +75,8 @@ def benchmark(f: Callable[[], Any], iters: Optional[int] = None,
 
   times_arr = np.array(times)
   print("---------Benchmark results for %s---------" % (name or f.__name__))
-  print("mean=%f std=%f %%std=%f total=%f" %
-        (times_arr.mean(), times_arr.std(), _pstd(times_arr), times_arr.sum()))
+  print(f"mean={times_arr.mean()} std={times_arr.std()} "
+        f"%%std={_pstd(times_arr)} total={times_arr.sum()}")
   print("#iters=%d #warmup=%d" % (count, warmup))
   print()
   return times_arr
@@ -101,7 +101,7 @@ def benchmark_suite(prepare: Callable[..., Callable], params_list: List[Dict],
   times = []
   for params in params_list:
     f = prepare(**params)
-    subname = name + "".join("_%s=%s" % (n, _param_str(p))
+    subname = name + "".join(f"_{n}={_param_str(p)}"
                              for n, p in params.items())
     times.append(benchmark(f, name=subname,
                            target_total_secs=target_total_secs))
@@ -126,7 +126,7 @@ def benchmark_suite(prepare: Callable[..., Callable], params_list: List[Dict],
 
   if FLAGS.export_dir:
     filename = _export_results(data_header, data, FLAGS.export_dir, name)
-    print("Wrote %s results to %s" % (name, filename))
+    print(f"Wrote {name} results to {filename}")
     print()
 
 

@@ -21,9 +21,8 @@ from absl.testing import absltest
 import jax
 import jax.numpy as jnp
 from jax import lax
-from jax import test_util as jtu
-from jax.lib import xla_bridge
-from jax.interpreters import xla
+from jax._src import test_util as jtu
+from jax._src.lib import xla_bridge
 
 from jax.config import config
 config.parse_flags_with_absl()
@@ -70,6 +69,8 @@ class MultiDeviceTest(jtu.JaxTestCase):
     self.assertEqual(data.device_buffer.device(), device)
 
   def test_computation_follows_data(self):
+    if jax.device_count() < 5:
+      self.skipTest("test requires 5 devices")
     devices = self.get_devices()
 
     # By default, computation is placed (uncommitted) on device 0
@@ -182,7 +183,7 @@ class MultiDeviceTest(jtu.JaxTestCase):
     devices = self.get_devices()
 
     def f(): return lax.add(3., 4.)
-    self.assertIsInstance(f(), xla.DeviceArray)
+    self.assertIsInstance(f(), jnp.DeviceArray)
     self.assert_uncommitted_to_device(f(), devices[0])
     self.assert_uncommitted_to_device(jax.jit(f)(), devices[0])
     self.assert_committed_to_device(jax.jit(f, device=devices[1])(),
@@ -198,6 +199,8 @@ class MultiDeviceTest(jtu.JaxTestCase):
     self.assert_committed_to_device(z, devices[1])
 
   def test_broadcast(self):
+    if jax.device_count() < 3:
+      self.skipTest("test requires 3 devices")
     devices = self.get_devices()
 
     z = 1 + jnp.ones((2, 3))
@@ -206,6 +209,8 @@ class MultiDeviceTest(jtu.JaxTestCase):
     self.assert_committed_to_device(y, devices[2])
 
   def test_transpose(self):
+    if jax.device_count() < 3:
+      self.skipTest("test requires 3 devices")
     devices = self.get_devices()
 
     x = jnp.ones((2, 3))

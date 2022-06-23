@@ -5,7 +5,7 @@ jupytext:
     extension: .md
     format_name: myst
     format_version: 0.13
-    jupytext_version: 1.10.0
+    jupytext_version: 1.13.8
 kernelspec:
   display_name: Python 3
   name: python3
@@ -127,7 +127,7 @@ print(grad(f)(2., 3.))
 
 ## Example problems
 
-To get an idea of what problems `jax.custom_jvp` and `jax.custom_vjp` are meant to solve, let's go over a few examples. A more thorough introduction to the `jax.custom_jvp` and `jax.custom_vjp` APIs is in [the next section](#scrollTo=Dr0aNkBslfQf).
+To get an idea of what problems `jax.custom_jvp` and `jax.custom_vjp` are meant to solve, let's go over a few examples. A more thorough introduction to the `jax.custom_jvp` and `jax.custom_vjp` APIs is in the next section.
 
 +++ {"id": "AR02eyd1GQhC"}
 
@@ -437,7 +437,7 @@ def fixed_point(f, a, x_guess):
 
 +++ {"id": "p2xFQAte19sF"}
 
-This is an iterative procedure for numerically solving the equation $x = f(a, x)$ for $x$, by iterating $x_{t+1} = f(a, x_t)$ until $x_{t+1}$ is sufficiently close to $x_t$. The result $x^*$ depends on the parameters $a$, and so we can think of there being a function $a \mapsto x^*(a)$ that is implicity defined by equation $x = f(a, x)$.
+This is an iterative procedure for numerically solving the equation $x = f(a, x)$ for $x$, by iterating $x_{t+1} = f(a, x_t)$ until $x_{t+1}$ is sufficiently close to $x_t$. The result $x^*$ depends on the parameters $a$, and so we can think of there being a function $a \mapsto x^*(a)$ that is implicitly defined by equation $x = f(a, x)$.
 
 We can use `fixed_point` to run iterative procedures to convergence, for example running Newton's method to calculate square roots while only executing adds, multiplies, and divides:
 
@@ -560,7 +560,7 @@ print(grad(grad(jnp.sqrt))(2.))
 
 +++ {"id": "HowvqayEuy-H"}
 
-A limitation to this approach is that the argument `f` can't close over any values involved in differentiation. That is, you might notice that we kept the parameter `a` explicit in the argument list of `fixed_point`. While other JAX mechanisms can handle closed-over transformation-traced values in the arguments to higher-order functions (as is done for the control flow primitives like `lax.cond`, `lax.scan`, and `lax.while_loop` itself), `jax.custom_vjp` used as above cannot. A `fixed_point` routine that used a bit more of JAX's internals could have a more convenient and robust API.
+A limitation to this approach is that the argument `f` can't close over any values involved in differentiation. That is, you might notice that we kept the parameter `a` explicit in the argument list of `fixed_point`. For this use case, consider using the low-level primitive `lax.custom_root`, which allows for deriviatives in closed-over variables with custom root-finding functions.
 
 +++ {"id": "Dr0aNkBslfQf"}
 
@@ -570,7 +570,8 @@ A limitation to this approach is that the argument `f` can't close over any valu
 
 ### Use `jax.custom_jvp` to define forward-mode (and, indirectly, reverse-mode) rules
 
-Here's a canonical basic example of using `jax.custom_jvp`:
+Here's a canonical basic example of using `jax.custom_jvp`, where the comments use
+[Haskell-like type signatures](https://wiki.haskell.org/Type_signature):
 
 ```{code-cell} ipython3
 :id: nVkhbIFAOGZk
@@ -739,7 +740,7 @@ print(grad(f, 1)(2., 3.))
 
 +++ {"id": "kZ0yc-Ihoezk"}
 
-Calling a `jax.custom_jvp` function with keyword arguments, or writing a `jax.custom_jvp` function definition with default arguments, are both allowed so long as they can be unambiguosly mapped to positional arguments based on the function signature retrieved by the standard library `inspect.signature` mechanism.
+Calling a `jax.custom_jvp` function with keyword arguments, or writing a `jax.custom_jvp` function definition with default arguments, are both allowed so long as they can be unambiguously mapped to positional arguments based on the function signature retrieved by the standard library `inspect.signature` mechanism.
 
 +++ {"id": "3FGwfT67PDs9"}
 
@@ -919,7 +920,7 @@ print(grad(f)(2., 3.))
 
 +++ {"id": "GwC26P9kn8qw"}
 
-Calling a `jax.custom_vjp` function with keyword arguments, or writing a `jax.custom_vjp` function definition with default arguments, are both allowed so long as they can be unambiguosly mapped to positional arguments based on the function signature retrieved by the standard library `inspect.signature` mechanism.
+Calling a `jax.custom_vjp` function with keyword arguments, or writing a `jax.custom_vjp` function definition with default arguments, are both allowed so long as they can be unambiguously mapped to positional arguments based on the function signature retrieved by the standard library `inspect.signature` mechanism.
 
 +++ {"id": "XfH-ae8bYt6-"}
 

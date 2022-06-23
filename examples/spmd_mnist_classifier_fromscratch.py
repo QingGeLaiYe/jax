@@ -27,9 +27,9 @@ import time
 import numpy as np
 import numpy.random as npr
 
+import jax
 from jax import jit, grad, pmap
 from jax.scipy.special import logsumexp
-from jax.lib import xla_bridge
 from jax.tree_util import tree_map
 from jax import lax
 import jax.numpy as jnp
@@ -77,7 +77,7 @@ if __name__ == "__main__":
 
   # For this manual SPMD example, we get the number of devices (e.g. GPUs or
   # TPU cores) that we're using, and use it to reshape data minibatches.
-  num_devices = xla_bridge.device_count()
+  num_devices = jax.device_count()
   def data_stream():
     rng = npr.RandomState(0)
     while True:
@@ -123,6 +123,6 @@ if __name__ == "__main__":
     params = tree_map(lambda x: x[0], replicated_params)
     train_acc = accuracy(params, (train_images, train_labels))
     test_acc = accuracy(params, (test_images, test_labels))
-    print("Epoch {} in {:0.2f} sec".format(epoch, epoch_time))
-    print("Training set accuracy {}".format(train_acc))
-    print("Test set accuracy {}".format(test_acc))
+    print(f"Epoch {epoch} in {epoch_time:0.2f} sec")
+    print(f"Training set accuracy {train_acc}")
+    print(f"Test set accuracy {test_acc}")

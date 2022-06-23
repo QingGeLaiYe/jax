@@ -27,9 +27,9 @@ import matplotlib.pyplot as plt
 import jax
 import jax.numpy as jnp
 from jax import jit, grad, lax, random
-from jax.experimental import optimizers
-from jax.experimental import stax
-from jax.experimental.stax import Dense, FanOut, Relu, Softplus
+from jax.example_libraries import optimizers
+from jax.example_libraries import stax
+from jax.example_libraries.stax import Dense, FanOut, Relu, Softplus
 from examples import datasets
 
 
@@ -133,5 +133,5 @@ if __name__ == "__main__":
     tic = time.time()
     opt_state = run_epoch(random.PRNGKey(epoch), opt_state, train_images)
     test_elbo, sampled_images = evaluate(opt_state, test_images)
-    print("{: 3d} {} ({:.3f} sec)".format(epoch, test_elbo, time.time() - tic))
+    print(f"{epoch: 3d} {test_elbo} ({time.time() - tic:.3f} sec)")
     plt.imsave(imfile.format(epoch), sampled_images, cmap=plt.cm.gray)

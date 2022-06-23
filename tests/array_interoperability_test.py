@@ -19,9 +19,9 @@ from absl.testing import absltest, parameterized
 import jax
 from jax.config import config
 import jax.dlpack
-from jax.lib import xla_bridge, xla_client
+from jax._src.lib import xla_bridge, xla_client
 import jax.numpy as jnp
-from jax import test_util as jtu
+from jax._src import test_util as jtu
 
 import numpy as np
 
@@ -61,7 +61,7 @@ all_shapes = nonempty_array_shapes + empty_array_shapes
 
 class DLPackTest(jtu.JaxTestCase):
   def setUp(self):
-    super(DLPackTest, self).setUp()
+    super().setUp()
     if jtu.device_under_test() == "tpu":
       self.skipTest("DLPack not supported on TPU")
 
@@ -75,15 +75,12 @@ class DLPackTest(jtu.JaxTestCase):
      for dtype in dlpack_dtypes
      for take_ownership in [False, True]
      for gpu in [False, True]))
+  @jtu.skip_on_devices("rocm") # TODO(sharadmv,phawkins): see GH issue #10973
   def testJaxRoundTrip(self, shape, dtype, take_ownership, gpu):
     rng = jtu.rand_default(self.rng())
     np = rng(shape, dtype)
     if gpu and jax.default_backend() == "cpu":
       raise unittest.SkipTest("Skipping GPU test case on CPU")
-    if (not gpu and jax.default_backend() == "gpu" and
-        jax.lib._xla_extension_version < 25):
-      raise unittest.SkipTest("Mixed CPU/GPU dlpack support requires jaxlib "
-                              "0.1.68 or newer")
     device = jax.devices("gpu" if gpu else "cpu")[0]
     x = jax.device_put(np, device)
     dlpack = jax.dlpack.to_dlpack(x, take_ownership=take_ownership)
@@ -103,6 +100,7 @@ class DLPackTest(jtu.JaxTestCase):
      for shape in all_shapes
      for dtype in dlpack_dtypes))
   @unittest.skipIf(not tf, "Test requires TensorFlow")
+  @jtu.skip_on_devices("rocm") # TODO(sharadmv,phawkins): see GH issue #10973
   def testTensorFlowToJax(self, shape, dtype):
     if not config.x64_enabled and dtype in [jnp.int64, jnp.uint64, jnp.float64]:
       raise self.skipTest("x64 types are disabled by jax_enable_x64")
@@ -171,7 +169,7 @@ class DLPackTest(jtu.JaxTestCase):
     backend = xla_bridge.get_backend()
     client = getattr(backend, "client", backend)
 
-    regex_str = (r'Unimplemented: Only DLPack tensors with trivial \(compact\) '
+    regex_str = (r'UNIMPLEMENTED: Only DLPack tensors with trivial \(compact\) '
                  r'striding are supported')
     with self.assertRaisesRegex(RuntimeError, regex_str):
       xla_client._xla.dlpack_managed_tensor_to_buffer(
@@ -198,7 +196,7 @@ class DLPackTest(jtu.JaxTestCase):
 class CudaArrayInterfaceTest(jtu.JaxTestCase):
 
   def setUp(self):
-    super(CudaArrayInterfaceTest, self).setUp()
+    super().setUp()
     if jtu.device_under_test() != "gpu":
       self.skipTest("__cuda_array_interface__ is only supported on GPU")
 

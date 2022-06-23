@@ -69,13 +69,15 @@ extensions = [
     'matplotlib.sphinxext.plot_directive',
     'sphinx_autodoc_typehints',
     'myst_nb',
+    "sphinx_remove_toctrees",
+    'sphinx_copybutton',
     'jax_extensions',
 ]
 
 intersphinx_mapping = {
     'python': ('https://docs.python.org/3/', None),
     'numpy': ('https://numpy.org/doc/stable/', None),
-    'scipy': ('https://docs.scipy.org/doc/scipy/reference/', None),
+    'scipy': ('https://docs.scipy.org/doc/scipy-1.8.1/', None),
 }
 
 suppress_warnings = [
@@ -115,8 +117,19 @@ exclude_patterns = [
     # Ignore markdown source for notebooks; myst-nb builds from the ipynb
     # These are kept in sync using the jupytext pre-commit hook.
     'notebooks/*.md',
-    'jax-101/*.md',
+    'design_notes/type_promotion.md',
+    # TODO: revert to jax-101/*.md once 08-pjit has a notebook
+    'jax-101/01-jax-basics.md',
+    'jax-101/02-jitting.md',
+    'jax-101/03-vectorization.md',
+    'jax-101/04-advanced-autodiff.md',
+    'jax-101/05-random-numbers.md',
+    'jax-101/05.1-pytrees.md',
+    'jax-101/06-parallelism.md',
+    'jax-101/07-state.md',
     'autodidax.md',
+    # Attempt to fix RTD build failure
+    'transformations.md',
 ]
 
 # The name of the Pygments (syntax highlighting) style to use.
@@ -138,13 +151,14 @@ napolean_use_rtype = False
 # The theme to use for HTML and HTML Help pages.  See the documentation for
 # a list of builtin themes.
 #
-html_theme = 'sphinx_rtd_theme'
+html_theme = 'sphinx_book_theme'
 
 # Theme options are theme-specific and customize the look and feel of a theme
 # further.  For a list of options available for each theme, see the
 # documentation.
 html_theme_options = {
     'logo_only': True,
+    'show_toc_level': 2,
 }
 
 # The name of an image file (relative to this directory) to place at the top
@@ -169,26 +183,28 @@ html_static_path = ['_static']
 # html_sidebars = {}
 
 # -- Options for myst ----------------------------------------------
-jupyter_execute_notebooks = "force"
-execution_allow_errors = False
-execution_fail_on_error = True  # Requires https://github.com/executablebooks/MyST-NB/pull/296
+myst_heading_anchors = 3  # auto-generate 3 levels of heading anchors
+myst_enable_extensions = ['dollarmath']
+nb_execution_mode = "force"
+nb_execution_allow_errors = False
+nb_merge_streams = True
 
 # Notebook cell execution timeout; defaults to 30.
-execution_timeout = 100
+nb_execution_timeout = 100
 
 # List of patterns, relative to source directory, that match notebook
 # files that will not be executed.
-execution_excludepatterns = [
+nb_execution_excludepatterns = [
     # Slow notebook: long time to load tf.ds
     'notebooks/neural_network_with_tfds_data.*',
     # Slow notebook
     'notebooks/Neural_Network_and_Data_Loading.*',
-    'notebooks/score_matching.*',
-    'notebooks/maml.*',
     # Strange error apparently due to asynchronous cell execution
     'notebooks/thinking_in_jax.*',
     # TODO(jakevdp): enable execution on these
+    'design_notes/type_promotion.*',
     'jax-101/*',
+    'notebooks/xmap_tutorial.*',
 ]
 
 # -- Options for HTMLHelp output ---------------------------------------------
@@ -271,3 +287,7 @@ epub_exclude_files = ['search.html']
 # Tell sphinx-autodoc-typehints to generate stub parameter annotations including
 # types, even if the parameters aren't explicitly documented.
 always_document_param_types = True
+
+
+# Remove auto-generated API docs from sidebars. They take too long to build.
+remove_from_toctrees = ["_autosummary/*"]

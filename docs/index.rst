@@ -9,6 +9,7 @@ parallelize, Just-In-Time compile to GPU/TPU, and more.
    :maxdepth: 1
    :caption: Getting Started
 
+   installation
    notebooks/quickstart
    notebooks/thinking_in_jax
    notebooks/Common_Gotchas_in_JAX
@@ -23,13 +24,13 @@ parallelize, Just-In-Time compile to GPU/TPU, and more.
    :caption: Reference Documentation
 
    faq
-   transformations
    async_dispatch
    jaxpr
    notebooks/convolutions
    pytrees
    type_promotion
    errors
+   transfer_guard
    glossary
    changelog
 
@@ -44,9 +45,6 @@ parallelize, Just-In-Time compile to GPU/TPU, and more.
    notebooks/How_JAX_primitives_work
    notebooks/Writing_custom_interpreters_in_Jax
    notebooks/Neural_Network_and_Data_Loading
-   notebooks/XLA_in_Python
-   notebooks/maml
-   notebooks/score_matching
    notebooks/xmap_tutorial
    multi_process
 
@@ -54,6 +52,7 @@ parallelize, Just-In-Time compile to GPU/TPU, and more.
    :maxdepth: 1
    :caption: Notes
 
+   api_compatibility
    deprecation
    concurrency
    gpu_memory_allocation
@@ -70,6 +69,7 @@ parallelize, Just-In-Time compile to GPU/TPU, and more.
    developer
    jax_internal_api
    autodidax
+   design_notes/index
 
 .. toctree::
    :maxdepth: 3
